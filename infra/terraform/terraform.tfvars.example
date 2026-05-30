@@ -1,0 +1,20 @@
+project_id        = "your-gcp-project-id"
+sql_instance_name = "fraud-detection-postgres"
+postgres_user     = "fraud_app"
+
+model_storage_bucket_name = "fraud-detection"
+
+# Pass the real password with:
+# terraform apply -var='postgres_password=...'
+postgres_password = "replace-me"
+
+main_db = "fraud_detection"
+
+# Add your IP only if you connect directly to the public IP.
+# Prefer the Cloud SQL Auth Proxy for local development and workloads.
+authorized_networks = [
+  # {
+  #   name  = "home"
+  #   value = "203.0.113.10/32"
+  # }
+]
