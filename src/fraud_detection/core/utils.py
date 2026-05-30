@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import json
 import math
-import os
-from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any, Mapping
+from datetime import datetime
+from typing import Any
 
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from structlog import get_logger
 
-DEFAULT_MODEL_VERSION = "2"
+logger = get_logger(__name__)
+
 EMAIL_BIN = {
     "gmail.com": "google",
     "googlemail.com": "google",
@@ -28,46 +26,16 @@ EMAIL_BIN = {
     "me.com": "apple",
     "mac.com": "apple",
 }
+
 EMAIL_NULLS = {"anonymous.com", "mail.com"}
 
+MODEL_TO_CHANNEL = {
+    "W": "web",
+    "C": "mobile_app",
+    "R": "pos",
+}
 
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[4]
-
-
-def default_model_dir() -> Path:
-    configured = os.getenv("FRAUD_MODEL_DIR")
-    if configured:
-        return Path(configured).expanduser().resolve()
-
-    version = os.getenv("FRAUD_MODEL_VERSION", DEFAULT_MODEL_VERSION)
-    return repo_root() / "models" / version
-
-
-def redis_connection_settings() -> dict[str, Any]:
-    return {
-        "host": os.getenv("REDIS_HOST") or os.getenv("REDIS__HOST") or "localhost",
-        "port": int(os.getenv("REDIS_PORT") or os.getenv("REDIS__PORT") or 6379),
-        "db": int(os.getenv("REDIS_DB") or os.getenv("REDIS__DB") or 0),
-        "decode_responses": True,
-    }
-
-
-def load_artifacts(model_dir: Path | str | None = None) -> tuple[lgb.Booster, dict[str, Any]]:
-    artifact_dir = Path(model_dir) if model_dir is not None else default_model_dir()
-    model_path = artifact_dir / "model.txt"
-    schema_path = artifact_dir / "feature_schema.json"
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-    if not schema_path.exists():
-        raise FileNotFoundError(f"Feature schema not found: {schema_path}")
-
-    model = lgb.Booster(model_file=str(model_path))
-    schema = json.loads(schema_path.read_text())
-    return model, schema
-
-
-def first_value(data: Mapping[str, Any], *keys: str) -> Any:
+def first_value(data: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in data and data[key] is not None:
             return data[key]
@@ -85,11 +53,44 @@ def to_number(value: Any, default: float = np.nan) -> float:
         return default
 
 
+def to_float(value: Any, feature: str, default: float = 0.0) -> float:
+    if value is None or pd.isna(value):
+        return default
+    if isinstance(value, str) and not value.strip():
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "Invalid numeric feature value",
+            extra={
+                "feature": feature,
+                "value": repr(value),
+            },
+        )
+        raise ValueError(f"Feature {feature!r} must be numeric, got {value!r}") from exc
+    return number if math.isfinite(number) else default
+
+
+def parse_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def to_int_like(value: Any, default: int = 0) -> int:
     number = to_number(value, default=float(default))
     if math.isnan(number):
         return default
     return int(number)
+
+
+def to_model_card_id(value: Any, default: int = 0) -> int:
+    if isinstance(value, str):
+        identifier = value.strip().lower()
+        if len(identifier) == 32 and all(
+            character in "0123456789abcdef" for character in identifier
+        ):
+            return int(identifier, 16) % 2_147_483_647
+    return to_int_like(value, default=default)
 
 
 def utc_timestamp(value: Any) -> pd.Timestamp:
@@ -101,7 +102,7 @@ def utc_timestamp(value: Any) -> pd.Timestamp:
     return timestamp
 
 
-def event_offset_seconds(row: Mapping[str, Any], schema: Mapping[str, Any]) -> float:
+def event_offset_seconds(row: dict[str, Any], schema: dict[str, Any]) -> float:
     explicit = first_value(row, "event_ts_offset_s", "TransactionDT")
     if explicit is not None:
         return float(explicit)
@@ -111,17 +112,17 @@ def event_offset_seconds(row: Mapping[str, Any], schema: Mapping[str, Any]) -> f
     return float((utc_timestamp(event_timestamp) - reference).total_seconds())
 
 
-def group_feature(row: Mapping[str, Any], group: str, *names: str) -> Any:
+def group_feature(row: dict[str, Any], group: str, *names: str) -> Any:
     value = row.get(group)
-    if not isinstance(value, Mapping):
+    if not isinstance(value, dict):
         return None
     return first_value(value, *names)
 
 
 def normalize_transaction(
-    transaction: Mapping[str, Any],
+    transaction: dict[str, Any],
     *,
-    feature_snapshot: Mapping[str, Any] | None = None,
+    feature_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     row = dict(transaction)
     snapshot = dict(feature_snapshot or {})
@@ -164,7 +165,7 @@ def normalize_transaction(
         if grouped_value is not None:
             normalized[model_col] = grouped_value
 
-    normalized["card_age_days"] = first_value(row, "card_age_days", "card_ages_days", "D4")
+    normalized["card_age_days"] = first_value(row, "card_age_days", "card_age_days", "D4")
     normalized["days_since_last_tx"] = first_value(
         row,
         "days_since_last_tx",
@@ -173,7 +174,7 @@ def normalize_transaction(
     )
 
     if normalized["card_age_days"] is None:
-        normalized["card_age_days"] = first_value(snapshot, "card_age_days", "card_ages_days")
+        normalized["card_age_days"] = first_value(snapshot, "card_age_days", "card_age_days")
     if normalized["days_since_last_tx"] is None:
         normalized["days_since_last_tx"] = first_value(
             snapshot,
@@ -194,7 +195,7 @@ def normalize_transaction(
     normalized["C13"] = to_int_like(normalized["C13"], default=1)
     normalized["D4"] = to_number(normalized["D4"], default=0.0)
     normalized["D15"] = to_number(normalized["D15"], default=0.0)
-    normalized["card_id"] = to_int_like(normalized["card_id"], default=0)
+    normalized["card_id"] = to_model_card_id(normalized["card_id"], default=0)
     normalized["issuer_code"] = to_int_like(normalized["issuer_code"], default=0)
     normalized["card_country"] = to_int_like(normalized["card_country"], default=0)
     normalized["bin_code"] = to_int_like(normalized["bin_code"], default=0)
@@ -301,7 +302,7 @@ def add_identity_features(df: pd.DataFrame) -> None:
     df["device_type"] = device_type.fillna("missing").astype(str)
 
 
-def build_base_features(rows: list[dict[str, Any]], schema: Mapping[str, Any]) -> pd.DataFrame:
+def build_base_features(rows: list[dict[str, Any]], schema: dict[str, Any]) -> pd.DataFrame:
     clean_rows = []
     for row in rows:
         clean = dict(row)
@@ -346,7 +347,7 @@ def build_base_features(rows: list[dict[str, Any]], schema: Mapping[str, Any]) -
     return df
 
 
-def init_history_defaults(df: pd.DataFrame, schema: Mapping[str, Any]) -> None:
+def init_history_defaults(df: pd.DataFrame, schema: dict[str, Any]) -> None:
     for uid in schema.get("uid_columns", ["uid1", "uid2", "uid3", "uid4"]):
         for col in schema.get("uid_agg_targets", ["amount_usd", "C13", "D15", "D4"]):
             df[f"{uid}_{col}_mean"] = np.nan
@@ -361,8 +362,8 @@ def init_history_defaults(df: pd.DataFrame, schema: Mapping[str, Any]) -> None:
 def apply_previous_transactions(
     df: pd.DataFrame,
     previous_transactions: list[dict[str, Any]],
-    schema: Mapping[str, Any],
-    feature_snapshot: Mapping[str, Any] | None,
+    schema: dict[str, Any],
+    feature_snapshot: dict[str, Any] | None,
 ) -> dict[str, int]:
     if not previous_transactions:
         return {"history_rows": 0, "matched_uid2_rows": 0, "matched_card_rows": 0}
@@ -409,7 +410,7 @@ def apply_previous_transactions(
     }
 
 
-def apply_schema(df: pd.DataFrame, schema: Mapping[str, Any]) -> tuple[pd.DataFrame, int]:
+def apply_schema(df: pd.DataFrame, schema: dict[str, Any]) -> tuple[pd.DataFrame, int]:
     cold_lookups = 0
     for col, table in schema.get("freq_tables", {}).items():
         if col not in df.columns:
@@ -423,14 +424,14 @@ def apply_schema(df: pd.DataFrame, schema: Mapping[str, Any]) -> tuple[pd.DataFr
     df.drop(columns=[col for col in uid_columns if col in df.columns], inplace=True, errors="ignore")
 
     missing_categoricals: dict[str, list[int]] = {}
-    for col, mapping in schema.get("categorical_encoders", {}).items():
-        default = mapping.get("missing", 0)
+    for col, dict in schema.get("categorical_encoders", {}).items():
+        default = dict.get("missing", 0)
         if col not in df.columns:
             missing_categoricals[col] = [default] * len(df)
             continue
         value = str(df[col].iloc[0]) if pd.notna(df[col].iloc[0]) else "missing"
-        df[col] = mapping.get(value, default)
-        if value not in mapping:
+        df[col] = dict.get(value, default)
+        if value not in dict:
             cold_lookups += 1
 
     if missing_categoricals:
@@ -439,7 +440,7 @@ def apply_schema(df: pd.DataFrame, schema: Mapping[str, Any]) -> tuple[pd.DataFr
     return df, cold_lookups
 
 
-def assemble_vector(df: pd.DataFrame, schema: Mapping[str, Any]) -> tuple[pd.DataFrame, list[str]]:
+def assemble_vector(df: pd.DataFrame, schema: dict[str, Any]) -> tuple[pd.DataFrame, list[str]]:
     feature_columns = schema["feature_columns"]
     missing_columns = [col for col in feature_columns if col not in df.columns]
     if missing_columns:
@@ -453,9 +454,9 @@ def assemble_vector(df: pd.DataFrame, schema: Mapping[str, Any]) -> tuple[pd.Dat
     return model_inputs, missing_columns
 
 
-def history_from_payload(payload: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def history_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     features = payload.get("features", {})
-    if not isinstance(features, Mapping):
+    if not isinstance(features, dict):
         features = {}
 
     transactions = payload.get("transactions", [])
@@ -463,27 +464,26 @@ def history_from_payload(payload: Mapping[str, Any]) -> tuple[dict[str, Any], li
         transactions = []
 
     history = payload.get("history", {})
-    if isinstance(history, Mapping):
+    if isinstance(history, dict):
         history_features = history.get("feature_snapshot", {})
-        if isinstance(history_features, Mapping):
+        if isinstance(history_features, dict):
             features = {**history_features, **features}
         previous = history.get("previous_transactions", [])
         if isinstance(previous, list) and not transactions:
             transactions = previous
 
-    return dict(features), [dict(row) for row in transactions if isinstance(row, Mapping)]
+    return dict(features), [dict(row) for row in transactions if isinstance(row, dict)]
 
 
-def current_from_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+def current_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     current = payload.get("current_transaction", payload)
-    if not isinstance(current, Mapping):
+    if not isinstance(current, dict):
         raise TypeError("payload current_transaction must be an object")
     return current
 
-
 def build_model_inputs(
-    payload: Mapping[str, Any],
-    schema: Mapping[str, Any],
+    payload: dict[str, Any],
+    schema: dict[str, Any],
 ) -> tuple[pd.DataFrame, dict[str, Any], dict[str, int], int, list[str]]:
     features, previous_transactions = history_from_payload(payload)
     current = normalize_transaction(current_from_payload(payload), feature_snapshot=features)
@@ -496,87 +496,26 @@ def build_model_inputs(
 
 
 def enrich_current_transaction_with_redis_features(
-    current_transaction: Mapping[str, Any],
-    redis_state: Mapping[str, Any],
+    current_transaction: dict[str, Any],
+    redis_state: dict[str, Any],
 ) -> dict[str, Any]:
-    current = dict(current_transaction)
     features = redis_state.get("features", {})
     transactions = redis_state.get("transactions", [])
-    if not isinstance(features, Mapping):
+    if not isinstance(features, dict):
         features = {}
     if not isinstance(transactions, list):
         transactions = []
 
     previous_tx_count = to_int_like(
-        first_value(features, "previous_tx_count", "no_transactions_30_days"),
+        features.get("no_transactions_30_days"),
         default=len(transactions),
     )
-    card_age_days = first_value(features, "card_age_days", "card_ages_days")
-    days_since_last_tx = first_value(
-        features,
-        "days_since_last_tx",
-        "no_days_since_last_txn",
-    )
+    card_age_days = features.get("card_age_days")
+    days_since_last_tx = features.get("no_days_since_last_txn")
 
-    for key in ("issuer_code", "card_type", "card_brand", "card_country"):
-        if key in features:
-            current.setdefault(key, features[key])
-
-    current.setdefault("C13", previous_tx_count + 1)
+    current_transaction["C13"] = previous_tx_count + 1
     if card_age_days is not None:
-        current.setdefault("D4", card_age_days)
+        current_transaction["D4"] = card_age_days
     if days_since_last_tx is not None:
-        current.setdefault("D15", days_since_last_tx)
-    return current
-
-
-def build_fake_current_transaction(
-    *,
-    user_id: str = "1",
-    card_id: str = "1",
-    transaction_id: str = "9000001",
-    amount: float = 5000000.0,
-    channel: str = "W",
-    created_at: str | None = None,
-) -> dict[str, Any]:
-    timestamp = (
-        created_at
-        or datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    )
-
-    return {
-        "transaction_id": transaction_id,
-        "user_id": user_id,
-        "card_id": card_id,
-        "amount": amount,
-        "channel": channel,
-        "billing_zone": 1,
-        "billing_country": 840,
-        "email_purchaser": "gmail.com",
-        "email_recipient": "gmail.com",
-        "device_info": "mobile:Android 14:Chrome Mobile",
-        "device_type": "mobile",
-        "os_raw": "Android 14",
-        "browser_raw": "Chrome Mobile",
-        "screen_resolution": "412x915",
-        "created_at": timestamp,
-        "C1": 500,
-        "C2": 500,
-        "M1": "F",
-        "M2": "F",
-        "M6": "T",
-    }
-
-
-def load_schema(model_dir: Path | str | None = None) -> dict[str, Any]:
-    artifact_dirs = [Path(model_dir)] if model_dir is not None else [default_model_dir()]
-    if model_dir is None:
-        artifact_dirs.append(default_model_dir().parent)
-
-    for artifact_dir in artifact_dirs:
-        schema_path = artifact_dir / "feature_schema.json"
-        if schema_path.exists():
-            return json.loads(schema_path.read_text())
-
-    searched = ", ".join(str(path / "feature_schema.json") for path in artifact_dirs)
-    raise FileNotFoundError(f"Feature schema not found. Searched: {searched}")
+        current_transaction["D15"] = days_since_last_tx
+    return current_transaction

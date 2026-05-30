@@ -11,14 +11,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from database.postgres import PostgresDatabase
 
-load_dotenv()
 
 DEFAULT_LOOKBACK_DAYS = 30
 DEFAULT_REDIS_HOST = "localhost"
@@ -27,11 +24,11 @@ DEFAULT_REDIS_DB = 0
 SECONDS_PER_DAY = 24 * 60 * 60
 
 
-def redis_transactions_key(user_id: int, card_id: int) -> str:
+def redis_transactions_key(user_id: str, card_id: str) -> str:
     return f"user:card:transactions:{user_id}_{card_id}"
 
 
-def redis_features_key(user_id: int, card_id: int) -> str:
+def redis_features_key(user_id: str, card_id: str) -> str:
     return f"user:card:features:{user_id}_{card_id}"
 
 
@@ -118,13 +115,13 @@ async def get_data_from_postgres(
     *,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     now: datetime | None = None,
-) -> dict[tuple[int, int], list[dict[str, Any]]]:
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
     if lookback_days < 1:
         raise ValueError("lookback_days must be greater than 0")
 
     now = now or utc_now()
     cutoff = now - timedelta(days=lookback_days)
-    grouped_transactions: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    grouped_transactions: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
 
     async with database.connection() as conn:
         rows = await conn.fetch(
@@ -176,12 +173,8 @@ def feature_payload(
     card_created_at = to_utc(newest["card_created_at"])
     last_txn_at = to_utc(newest["created_at"])
     return {
-        "issuer_code": issuer_numeric(newest["issuer_code"]),
-        "card_type": newest["card_type"],
-        "card_brand": newest["card_brand"],
-        "card_country": newest["card_country"],
         "no_transactions_30_days": len(rows),
-        "card_ages_days": (now - card_created_at).total_seconds() / SECONDS_PER_DAY,
+        "card_age_days": (now - card_created_at).total_seconds() / SECONDS_PER_DAY,
         "no_days_since_last_txn": (now - last_txn_at).total_seconds() / SECONDS_PER_DAY,
         "card_created_at": iso_z(card_created_at),
         "last_txn_at": iso_z(last_txn_at),
@@ -189,7 +182,7 @@ def feature_payload(
 
 
 async def store_grouped_transactions(
-    grouped_transactions: dict[tuple[int, int], list[dict[str, Any]]],
+    grouped_transactions: dict[tuple[str, str], list[dict[str, Any]]],
     *,
     host: str = DEFAULT_REDIS_HOST,
     port: int = DEFAULT_REDIS_PORT,
@@ -220,8 +213,8 @@ async def store_grouped_transactions(
                 pipeline.delete(transactions_key, features_key)
 
             chronological_rows = sorted(rows, key=lambda row: row["created_at"])
-            previous_created_by_id: dict[int, datetime] = {}
-            previous_count_by_id: dict[int, int] = {}
+            previous_created_by_id: dict[str, datetime] = {}
+            previous_count_by_id: dict[str, int] = {}
             previous_created_at = to_utc(chronological_rows[0]["card_created_at"])
             for previous_transaction_count, row in enumerate(chronological_rows):
                 previous_created_by_id[row["id"]] = previous_created_at
@@ -277,7 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
 async def main() -> None:
     args = build_parser().parse_args()
     now = utc_now()
-    database = PostgresDatabase()
+    database = PostgresDatabase.from_env()
     await database.open()
     try:
         grouped_transactions = await get_data_from_postgres(

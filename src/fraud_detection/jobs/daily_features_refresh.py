@@ -69,7 +69,7 @@ async def refresh_one_key(
     }
 
     if card_created_at:
-        feature_updates["card_ages_days"] = days_between(parse_datetime(card_created_at), now)
+        feature_updates["card_age_days"] = days_between(parse_datetime(card_created_at), now)
 
     if latest_transaction_raw:
         latest_transaction = json.loads(latest_transaction_raw)
