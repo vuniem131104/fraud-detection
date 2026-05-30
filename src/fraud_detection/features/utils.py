@@ -1,11 +1,11 @@
 from datetime import datetime
 
 refresh_key_script = """
+redis.call('ZADD', KEYS[1], ARGV[3], ARGV[2])
 local removed = redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, ARGV[1])
 local remaining = redis.call('ZCARD', KEYS[1])
-local latest = redis.call('ZREVRANGE', KEYS[1], 0, 0)[1] or false
 local card_created_at = redis.call('HGET', KEYS[2], 'card_created_at') or false
-return {removed, remaining, latest, card_created_at}
+return {removed, remaining, card_created_at}
 """
 
 def parse_datetime(value: str) -> datetime:

@@ -1,8 +1,8 @@
 from redis import asyncio as aioredis
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping
+from typing import Any
 import json
-from utils import (
+from .utils import (
     refresh_key_script,
     parse_datetime,
     days_between,
@@ -35,7 +35,7 @@ class RedisFeatureStore:
 
         return {"value": decoded}
 
-    def decode_features(self, values: Mapping[Any, Any]) -> dict[str, Any]:
+    def decode_features(self, values: dict[Any, Any]) -> dict[str, Any]:
         return {
             str(self.decode_redis_value(key)): self.decode_redis_value(value)
             for key, value in values.items()
@@ -106,6 +106,7 @@ class RedisFeatureStore:
         self,
         user_id: str,
         card_id: str,
+        current_transaction: dict[str, Any],
         cutoff_days: int = 30,
     ) -> None:
         if cutoff_days < 1:
@@ -116,6 +117,8 @@ class RedisFeatureStore:
         cutoff_score = int(cutoff.timestamp())
         transactions_key = build_transactions_key(user_id, card_id)
         features_key = build_features_key(user_id, card_id)
+        transaction_score = int(parse_datetime(current_transaction["event_timestamp"]).timestamp())
+        serialized_transaction = json.dumps(current_transaction, separators=(",", ":"))
         
         try:
             logger.info(
@@ -132,30 +135,24 @@ class RedisFeatureStore:
                 transactions_key,
                 features_key,
                 cutoff_score,
+                serialized_transaction,
+                transaction_score,
             )
-            removed_count, remaining_count, latest_transaction_raw, card_created_at = (
-                list(refresh_result) + [None, None]
-            )[:4]
-            latest_transaction_raw = self.decode_redis_value(latest_transaction_raw)
+            values = list(refresh_result or [])
+            values.extend([None] * (3 - len(values)))
+            removed_count, remaining_count, card_created_at = values[:3]
             card_created_at = self.decode_redis_value(card_created_at)
             feature_updates = {
                 "no_transactions_30_days": remaining_count,
             }
 
             if card_created_at:
-                feature_updates["card_ages_days"] = days_between(parse_datetime(card_created_at), now)
+                feature_updates["card_age_days"] = days_between(parse_datetime(card_created_at), now)
 
-            if latest_transaction_raw:
-                latest_transaction = json.loads(latest_transaction_raw)
-                last_txn_at = latest_transaction["created_at"]
-                feature_updates["last_txn_at"] = last_txn_at
-                feature_updates["no_days_since_last_txn"] = days_between(parse_datetime(last_txn_at), now)
-                await self.redis_client.hset(features_key, mapping=feature_updates)
-            else:
-                pipeline = self.redis_client.pipeline(transaction=False)
-                pipeline.hset(features_key, mapping=feature_updates)
-                pipeline.hdel(features_key, "last_txn_at", "no_days_since_last_txn")
-                await pipeline.execute()
+            last_txn_at = current_transaction["event_timestamp"]
+            feature_updates["last_txn_at"] = last_txn_at
+            feature_updates["no_days_since_last_txn"] = days_between(parse_datetime(last_txn_at), now)
+            await self.redis_client.hset(features_key, mapping=feature_updates)
                 
             logger.info(
                 "Finished refreshing features for user card",
@@ -176,13 +173,3 @@ class RedisFeatureStore:
                     "error": str(e),
                 }
             )
-            
-if __name__ == "__main__":
-    import asyncio
-
-    async def main():
-        redis_client = aioredis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
-        feature_store = RedisFeatureStore(redis_client)
-        await feature_store.get_txs("1", "1")
-
-    asyncio.run(main())

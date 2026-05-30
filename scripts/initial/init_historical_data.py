@@ -9,6 +9,7 @@ import shutil
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import asyncpg
 
@@ -34,7 +35,7 @@ DROP TABLE IF EXISTS application.cards CASCADE;
 DROP TABLE IF EXISTS application.users CASCADE;
 
 CREATE TABLE application.users (
-    id BIGSERIAL PRIMARY KEY,
+    id TEXT PRIMARY KEY CHECK (id ~ '^[0-9a-f]{32}$'),
     name TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
@@ -43,8 +44,8 @@ CREATE TABLE application.users (
 );
 
 CREATE TABLE application.cards (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES application.users(id) ON DELETE CASCADE,
+    id TEXT PRIMARY KEY CHECK (id ~ '^[0-9a-f]{32}$'),
+    user_id TEXT NOT NULL REFERENCES application.users(id) ON DELETE CASCADE,
     issuer_code TEXT NOT NULL,
     country INTEGER NOT NULL,
     brand TEXT NOT NULL,
@@ -54,9 +55,9 @@ CREATE TABLE application.cards (
 );
 
 CREATE TABLE application.transactions (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES application.users(id) ON DELETE CASCADE,
-    card_id BIGINT REFERENCES application.cards(id) ON DELETE SET NULL,
+    id TEXT PRIMARY KEY CHECK (id ~ '^[0-9a-f]{32}$'),
+    user_id TEXT NOT NULL REFERENCES application.users(id) ON DELETE CASCADE,
+    card_id TEXT REFERENCES application.cards(id) ON DELETE SET NULL,
     status TEXT NOT NULL CHECK (status IN ('approved', 'review')),
     amount_usd NUMERIC(14, 2) NOT NULL CHECK (amount_usd > 0),
     channel TEXT,
@@ -166,7 +167,7 @@ def hash_password(password: str, salt: bytes) -> str:
     ).hex()
 
 
-def fake_users(count: int, password: str) -> list[tuple[str, str, str, str, datetime]]:
+def fake_users(count: int, password: str) -> list[tuple[str, str, str, str, str, datetime]]:
     available_domains = domains()
     base_time = datetime.now(UTC).replace(microsecond=0) - timedelta(days=count)
     rows = []
@@ -177,6 +178,7 @@ def fake_users(count: int, password: str) -> list[tuple[str, str, str, str, date
         salt = salt_for(index)
         rows.append(
             (
+                uuid4().hex,
                 f"Fake User {index:04d}",
                 email,
                 hash_password(password, salt),
@@ -224,8 +226,8 @@ async def seed_fake_users(
         await conn.executemany(
             """
             INSERT INTO application.users
-                (name, email, password_hash, salt, created_at)
-            VALUES ($1, $2, $3, $4, $5)
+                (id, name, email, password_hash, salt, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (email) DO NOTHING
             """,
             rows,
@@ -309,8 +311,12 @@ def normal_billing(card_country: int, rng: random.Random) -> tuple[int, int]:
     return rng.choice(same_zone) if same_zone else (card_country, zone)
 
 
-def card_device_profile(card_id: int, rng: random.Random) -> tuple[str, str, str, str]:
-    profile_index = (card_id + rng.randint(0, 1)) % len(DEVICE_PROFILES)
+def numeric_uuid(identifier: str) -> int:
+    return int(identifier, 16) % 2_147_483_647
+
+
+def card_device_profile(card_id: str, rng: random.Random) -> tuple[str, str, str, str]:
+    profile_index = (numeric_uuid(card_id) + rng.randint(0, 1)) % len(DEVICE_PROFILES)
     return DEVICE_PROFILES[profile_index]
 
 
@@ -375,6 +381,7 @@ async def seed_cards(
             card_type = CARD_TYPES[(index - 1) % len(CARD_TYPES)]
             card_rows.append(
                 (
+                    uuid4().hex,
                     user["id"],
                     issuer_code(country, index),
                     country,
@@ -389,9 +396,9 @@ async def seed_cards(
             await conn.executemany(
                 """
                 INSERT INTO application.cards
-                    (user_id, issuer_code, country, brand, type, bin_code, created_at)
+                    (id, user_id, issuer_code, country, brand, type, bin_code, created_at)
                 VALUES
-                    ($1, $2, $3, $4, $5, $6, $7)
+                    ($1, $2, $3, $4, $5, $6, $7, $8)
                 """,
                 card_rows,
             )
@@ -417,6 +424,7 @@ def transaction_row(
     created_at: datetime,
 ) -> tuple:
     return (
+        uuid4().hex,
         card["user_id"],
         card["id"],
         status,
@@ -442,13 +450,13 @@ async def insert_transaction_rows(conn: asyncpg.Connection, rows: list[tuple]) -
         """
         INSERT INTO application.transactions
             (
-                user_id, card_id, status, amount_usd, channel,
+                id, user_id, card_id, status, amount_usd, channel,
                 billing_zone, billing_country, email_purchaser,
                 email_recipient, device_info, device_type, os_raw,
                 browser_raw, screen_resolution, created_at
             )
         VALUES
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         """,
         rows,
     )
@@ -518,7 +526,7 @@ async def seed_transactions(
         rows: list[tuple] = []
         for card in anomaly_cards:
             device_type, os_raw, browser_raw, screen_resolution = card_device_profile(
-                int(card["id"]), rng
+                card["id"], rng
             )
             for days_ago in (28, 14, 3):
                 billing_country, billing_zone = normal_billing(int(card["country"]), rng)
@@ -548,7 +556,7 @@ async def seed_transactions(
         while len(rows) < normal_count:
             card = rng.choice(normal_cards)
             device_type, os_raw, browser_raw, screen_resolution = card_device_profile(
-                int(card["id"]), rng
+                card["id"], rng
             )
             billing_country, billing_zone = normal_billing(int(card["country"]), rng)
             rows.append(
@@ -582,19 +590,20 @@ async def seed_transactions(
                 """
                 INSERT INTO application.transactions
                     (
-                        user_id, card_id, status, amount_usd, channel,
+                        id, user_id, card_id, status, amount_usd, channel,
                         billing_zone, billing_country, email_purchaser,
                         email_recipient, device_info, device_type, os_raw,
                         browser_raw, screen_resolution, created_at
                 )
                 VALUES
-                    ($1, $2, 'review', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    ($1, $2, $3, 'review', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 RETURNING
                     id, user_id, card_id, status, amount_usd, channel,
                     billing_zone, billing_country, email_purchaser,
                     email_recipient, device_info, device_type, os_raw,
                     browser_raw, screen_resolution, created_at
                 """,
+                uuid4().hex,
                 card["user_id"],
                 card["id"],
                 round(rng.uniform(1800, 9500), 2),
@@ -636,11 +645,11 @@ def model_channel(channel: str | None) -> str:
 def history_row(tx: dict, card: dict, history_index: int) -> dict:
     card_age_days = max((tx["created_at"].date() - card["card_created_at"].date()).days, 0)
     return {
-        "tx_id": int(tx["id"]),
+        "tx_id": numeric_uuid(tx["id"]),
         "event_timestamp": iso_z(tx["created_at"]),
         "amount_usd": float(tx["amount_usd"]),
         "channel": model_channel(tx["channel"]),
-        "card_id": int(card["id"]),
+        "card_id": numeric_uuid(card["id"]),
         "issuer_code": issuer_numeric(card["issuer_code"]),
         "card_country": float(card["country"]),
         "card_brand": card["brand"],
@@ -696,11 +705,11 @@ def anomaly_row(tx: dict, card: dict, history_count: int) -> dict:
     card_age_days = max((tx["created_at"].date() - card["card_created_at"].date()).days, 0)
     days_since_last_tx = max((tx["created_at"] - last_tx_at).total_seconds() / 86400, 0.0)
     return {
-        "tx_id": int(tx["id"]),
+        "tx_id": numeric_uuid(tx["id"]),
         "event_timestamp": iso_z(tx["created_at"]),
         "amount_usd": float(tx["amount_usd"]),
         "channel": model_channel(tx["channel"]),
-        "card_id": int(card["id"]),
+        "card_id": numeric_uuid(card["id"]),
         "issuer_code": issuer_numeric(card["issuer_code"]),
         "card_country": float(card["country"]),
         "card_brand": card["brand"],
@@ -756,7 +765,7 @@ async def init_application_schema(database: PostgresDatabase) -> None:
 
 
 async def run_init_db() -> int:
-    database = PostgresDatabase()
+    database = PostgresDatabase.from_env()
     await database.open()
     try:
         await init_application_schema(database)
@@ -776,7 +785,7 @@ async def run_all(args: argparse.Namespace) -> int:
     if args.anomaly_count <= 0:
         raise ValueError("--anomaly-count must be greater than 0")
 
-    database = PostgresDatabase()
+    database = PostgresDatabase.from_env()
     await database.open()
     try:
         await init_application_schema(database)
