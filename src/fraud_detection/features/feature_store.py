@@ -36,17 +36,20 @@ class RedisFeatureStore:
         return {"value": decoded}
 
     def decode_features(self, values: dict[Any, Any]) -> dict[str, Any]:
-        return {
-            str(self.decode_redis_value(key)): self.decode_redis_value(value)
-            for key, value in values.items()
+        feature_types = {
+            "no_transactions_30_days": int,
+            "card_age_days": float,
+            "no_days_since_last_txn": float,
         }
-
-    def pop_first_value(self, data: dict[str, Any], keys: list[str]) -> Any:
-        for key in keys:
-            if key in data:
-                return data.pop(key)
-
-        return None
+        decoded_features = {}
+        for key, value in values.items():
+            decoded_key = str(self.decode_redis_value(key))
+            decoded_value = self.decode_redis_value(value)
+            value_type = feature_types.get(decoded_key)
+            if value_type is not None:
+                decoded_value = value_type(decoded_value)
+            decoded_features[decoded_key] = decoded_value
+        return decoded_features
 
     async def get_txs(
         self,
@@ -118,7 +121,15 @@ class RedisFeatureStore:
         transactions_key = build_transactions_key(user_id, card_id)
         features_key = build_features_key(user_id, card_id)
         transaction_score = int(parse_datetime(current_transaction["event_timestamp"]).timestamp())
-        serialized_transaction = json.dumps(current_transaction, separators=(",", ":"))
+        transaction_to_store = dict(current_transaction)
+        for feature in ("D4", "D15"):
+            value = transaction_to_store.get(feature)
+            if value is not None:
+                try:
+                    transaction_to_store[feature] = float(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{feature} must be numeric, got {value!r}") from exc
+        serialized_transaction = json.dumps(transaction_to_store, separators=(",", ":"))
         
         try:
             logger.info(
