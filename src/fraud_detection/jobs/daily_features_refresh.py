@@ -73,7 +73,7 @@ async def refresh_one_key(
 
     if latest_transaction_raw:
         latest_transaction = json.loads(latest_transaction_raw)
-        last_txn_at = latest_transaction["created_at"]
+        last_txn_at = latest_transaction["event_timestamp"]
         feature_updates["last_txn_at"] = last_txn_at
         feature_updates["no_days_since_last_txn"] = days_between(parse_datetime(last_txn_at), now)
         await redis_client.hset(features_key, mapping=feature_updates)

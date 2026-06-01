@@ -7,6 +7,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from structlog import get_logger
+from datetime import datetime, UTC
+
 
 logger = get_logger(__name__)
 
@@ -35,13 +37,6 @@ MODEL_TO_CHANNEL = {
     "R": "pos",
 }
 
-def first_value(data: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        if key in data and data[key] is not None:
-            return data[key]
-    return None
-
-
 def to_number(value: Any, default: float = np.nan) -> float:
     if value is None:
         return default
@@ -53,7 +48,7 @@ def to_number(value: Any, default: float = np.nan) -> float:
         return default
 
 
-def to_float(value: Any, feature: str, default: float = 0.0) -> float:
+def to_float(value: Any, feature: str, default: float | None = None) -> float | None:
     if value is None or pd.isna(value):
         return default
     if isinstance(value, str) and not value.strip():
@@ -103,20 +98,13 @@ def utc_timestamp(value: Any) -> pd.Timestamp:
 
 
 def event_offset_seconds(row: dict[str, Any], schema: dict[str, Any]) -> float:
-    explicit = first_value(row, "event_ts_offset_s", "TransactionDT")
+    explicit = row.get("event_ts_offset_s")
     if explicit is not None:
         return float(explicit)
 
-    event_timestamp = first_value(row, "event_timestamp", "created_at")
+    event_timestamp = row.get("event_timestamp")
     reference = pd.Timestamp(schema["training_reference_ts"])
     return float((utc_timestamp(event_timestamp) - reference).total_seconds())
-
-
-def group_feature(row: dict[str, Any], group: str, *names: str) -> Any:
-    value = row.get(group)
-    if not isinstance(value, dict):
-        return None
-    return first_value(value, *names)
 
 
 def normalize_transaction(
@@ -128,66 +116,45 @@ def normalize_transaction(
     snapshot = dict(feature_snapshot or {})
 
     normalized: dict[str, Any] = {
-        "tx_id": first_value(row, "tx_id", "transaction_id", "TransactionID"),
-        "event_timestamp": first_value(row, "event_timestamp", "created_at"),
-        "amount_usd": first_value(row, "amount_usd", "amount", "TransactionAmt"),
-        "channel": first_value(row, "channel", "ProductCD") or "missing",
-        "user_id": first_value(row, "user_id"),
-        "card_id": first_value(row, "card_id", "card1") or 0,
-        "issuer_code": first_value(row, "issuer_code", "card2") or 0,
-        "card_country": first_value(row, "card_country") or 0,
-        "card_brand": first_value(row, "card_brand", "card4") or "missing",
-        "bin_code": first_value(row, "bin_code", "card5") or 0,
-        "card_type": first_value(row, "card_type", "card6") or "missing",
-        "billing_zone": first_value(row, "billing_zone", "addr1") or 0,
-        "billing_country": first_value(row, "billing_country", "addr2") or 0,
-        "email_purchaser": first_value(row, "email_purchaser", "P_emaildomain") or "missing",
-        "email_recipient": first_value(row, "email_recipient", "R_emaildomain") or "missing",
-        "device_type": first_value(row, "device_type", "DeviceType") or "missing",
-        "device_info": first_value(row, "device_info", "DeviceInfo") or "missing",
-        "os_raw": first_value(row, "os_raw", "id_30") or "missing",
-        "browser_raw": first_value(row, "browser_raw", "id_31") or "missing",
-        "screen_resolution": first_value(row, "screen_resolution", "id_33") or "0x0",
+        "tx_id": row.get("tx_id", None),
+        "event_timestamp": row.get("event_timestamp", None),
+        "amount_usd": row.get("amount_usd", None),
+        "channel": row.get("channel", None),
+        "user_id": row.get("user_id", None),
+        "card_id": row.get("card_id", None),
+        "issuer_code": row.get("issuer_code", None),
+        "card_country": row.get("card_country", None),
+        "card_brand": row.get("card_brand", None),
+        "bin_code": row.get("bin_code", None),
+        "card_type": row.get("card_type", None),
+        "billing_zone": row.get("billing_zone", None),
+        "billing_country": row.get("billing_country", None),
+        "email_purchaser": row.get("email_purchaser", None),
+        "email_recipient": row.get("email_recipient", None),
+        "device_type": row.get("device_type", None),
+        "device_info": row.get("device_info", None),
+        "os_raw": row.get("os_raw", None),
+        "browser_raw": row.get("browser_raw", None),
+        "screen_resolution": row.get("screen_resolution", None),
     }
 
-    for model_col, group, names in (
-        ("C1", "count_features", ("C1", "c1")),
-        ("C2", "count_features", ("C2", "c2")),
-        ("C13", "count_features", ("C13", "c13")),
-        ("D4", "time_delta_features", ("D4", "d4")),
-        ("D15", "time_delta_features", ("D15", "d15")),
-        ("M1", "match_features", ("M1", "m1")),
-        ("M2", "match_features", ("M2", "m2")),
-        ("M6", "match_features", ("M6", "m6")),
-    ):
-        normalized[model_col] = first_value(row, model_col, *names)
-        grouped_value = group_feature(row, group, *names)
-        if grouped_value is not None:
-            normalized[model_col] = grouped_value
+    for model_col in ("C1", "C2", "C13", "D4", "D15", "M1", "M2", "M6"):
+        normalized[model_col] = row.get(model_col)
 
-    normalized["card_age_days"] = first_value(row, "card_age_days", "card_age_days", "D4")
-    normalized["days_since_last_tx"] = first_value(
-        row,
-        "days_since_last_tx",
-        "no_days_since_last_txn",
-        "D15",
-    )
+    normalized["card_age_days"] = row.get("card_age_days")
+    normalized["days_since_last_tx"] = row.get("days_since_last_tx")
 
     if normalized["card_age_days"] is None:
-        normalized["card_age_days"] = first_value(snapshot, "card_age_days", "card_age_days")
+        normalized["card_age_days"] = snapshot.get("card_age_days")
     if normalized["days_since_last_tx"] is None:
-        normalized["days_since_last_tx"] = first_value(
-            snapshot,
-            "days_since_last_tx",
-            "no_days_since_last_txn",
-        )
+        normalized["days_since_last_tx"] = snapshot.get("no_days_since_last_txn")
 
     if normalized["D4"] is None:
         normalized["D4"] = normalized["card_age_days"]
     if normalized["D15"] is None:
         normalized["D15"] = normalized["days_since_last_tx"]
     if normalized["C13"] is None:
-        previous_count = first_value(snapshot, "previous_tx_count", "no_transactions_30_days")
+        previous_count = snapshot.get("no_transactions_30_days")
         normalized["C13"] = to_int_like(previous_count, default=0) + 1
 
     normalized["C1"] = to_int_like(normalized["C1"], default=1)
@@ -364,9 +331,9 @@ def apply_previous_transactions(
     previous_transactions: list[dict[str, Any]],
     schema: dict[str, Any],
     feature_snapshot: dict[str, Any] | None,
-) -> dict[str, int]:
+) -> None:
     if not previous_transactions:
-        return {"history_rows": 0, "matched_uid2_rows": 0, "matched_card_rows": 0}
+        return
 
     history_rows = [
         normalize_transaction(row, feature_snapshot=feature_snapshot)
@@ -375,7 +342,7 @@ def apply_previous_transactions(
     history = build_base_features(history_rows, schema)
     history = history[history["event_ts_offset_s"] < float(df["event_ts_offset_s"].iloc[0])].copy()
     if history.empty:
-        return {"history_rows": 0, "matched_uid2_rows": 0, "matched_card_rows": 0}
+        return
 
     uid_columns = schema.get("uid_columns", ["uid1", "uid2", "uid3", "uid4"])
     agg_targets = schema.get("uid_agg_targets", ["amount_usd", "C13", "D15", "D4"])
@@ -389,7 +356,6 @@ def apply_previous_transactions(
             df[f"{uid}_{col}_mean"] = float(numeric.mean())
             df[f"{uid}_{col}_std"] = float(numeric.std())
 
-    same_uid2 = history[history["uid2"] == df["uid2"].iloc[0]]
     same_card = history[history["card_id"].astype(str) == str(df["card_id"].iloc[0])]
     if not same_card.empty:
         amounts = pd.to_numeric(same_card["amount_usd"], errors="coerce").dropna()
@@ -403,22 +369,13 @@ def apply_previous_transactions(
                 (float(df["amount_usd"].iloc[0]) - amount_mean) / amount_mean
             )
 
-    return {
-        "history_rows": int(len(history)),
-        "matched_uid2_rows": int(len(same_uid2)),
-        "matched_card_rows": int(len(same_card)),
-    }
 
-
-def apply_schema(df: pd.DataFrame, schema: dict[str, Any]) -> tuple[pd.DataFrame, int]:
-    cold_lookups = 0
+def apply_schema(df: pd.DataFrame, schema: dict[str, Any]) -> pd.DataFrame:
     for col, table in schema.get("freq_tables", {}).items():
         if col not in df.columns:
             continue
         value = str(df[col].iloc[0])
         df[f"{col}_freq"] = float(table.get(value, 1))
-        if value not in table:
-            cold_lookups += 1
 
     uid_columns = schema.get("uid_columns", ["uid1", "uid2", "uid3", "uid4"])
     df.drop(columns=[col for col in uid_columns if col in df.columns], inplace=True, errors="ignore")
@@ -431,16 +388,14 @@ def apply_schema(df: pd.DataFrame, schema: dict[str, Any]) -> tuple[pd.DataFrame
             continue
         value = str(df[col].iloc[0]) if pd.notna(df[col].iloc[0]) else "missing"
         df[col] = dict.get(value, default)
-        if value not in dict:
-            cold_lookups += 1
 
     if missing_categoricals:
         df = pd.concat([df, pd.DataFrame(missing_categoricals, index=df.index)], axis=1)
 
-    return df, cold_lookups
+    return df
 
 
-def assemble_vector(df: pd.DataFrame, schema: dict[str, Any]) -> tuple[pd.DataFrame, list[str]]:
+def assemble_vector(df: pd.DataFrame, schema: dict[str, Any]) -> pd.DataFrame:
     feature_columns = schema["feature_columns"]
     missing_columns = [col for col in feature_columns if col not in df.columns]
     if missing_columns:
@@ -451,7 +406,7 @@ def assemble_vector(df: pd.DataFrame, schema: dict[str, Any]) -> tuple[pd.DataFr
     model_inputs = df[feature_columns].copy()
     for col in model_inputs.select_dtypes(include=["object"]).columns:
         model_inputs[col] = pd.to_numeric(model_inputs[col], errors="coerce")
-    return model_inputs, missing_columns
+    return model_inputs
 
 
 def history_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -484,15 +439,14 @@ def current_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def build_model_inputs(
     payload: dict[str, Any],
     schema: dict[str, Any],
-) -> tuple[pd.DataFrame, dict[str, Any], dict[str, int], int, list[str]]:
+) -> pd.DataFrame:
     features, previous_transactions = history_from_payload(payload)
     current = normalize_transaction(current_from_payload(payload), feature_snapshot=features)
     df = build_base_features([current], schema)
     init_history_defaults(df, schema)
-    history_stats = apply_previous_transactions(df, previous_transactions, schema, features)
-    df, cold_lookups = apply_schema(df, schema)
-    model_inputs, missing_columns = assemble_vector(df, schema)
-    return model_inputs, current, history_stats, cold_lookups, missing_columns
+    apply_previous_transactions(df, previous_transactions, schema, features)
+    df = apply_schema(df, schema)
+    return assemble_vector(df, schema)
 
 
 def enrich_current_transaction_with_redis_features(
@@ -513,9 +467,23 @@ def enrich_current_transaction_with_redis_features(
     card_age_days = features.get("card_age_days")
     days_since_last_tx = features.get("no_days_since_last_txn")
 
-    current_transaction["C13"] = previous_tx_count + 1
-    if card_age_days is not None:
-        current_transaction["D4"] = card_age_days
-    if days_since_last_tx is not None:
-        current_transaction["D15"] = days_since_last_tx
+    if to_number(current_transaction.get("C13"), default=0.0) == 0:
+        current_transaction["C13"] = previous_tx_count + 1
+    d4 = to_number(current_transaction.get("D4"), default=0.0)
+    d15 = to_number(current_transaction.get("D15"), default=0.0)
+    if card_age_days is not None and d4 == 0:
+        d4 = to_number(card_age_days, default=0.0)
+    if days_since_last_tx is not None and d15 == 0:
+        d15 = to_number(days_since_last_tx, default=0.0)
+    current_transaction["D4"] = d4
+    current_transaction["D15"] = d15
     return current_transaction
+
+def normalize_email(transaction: dict[str, Any]) -> dict[str, Any]:
+    normalized_transaction = transaction.copy()
+    for col in ("email_purchaser", "email_recipient"):
+        email = normalized_transaction.get(col, "")
+        if isinstance(email, str):
+            email = email.strip().lower()
+            normalized_transaction[col] = email.split("@")[-1] if "@" in email else email
+    return normalized_transaction

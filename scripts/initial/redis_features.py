@@ -80,14 +80,14 @@ def transaction_payload(
     created_at = to_utc(row["created_at"])
     card_created_at = to_utc(row["card_created_at"])
     return {
-        "transaction_id": str(row["id"]),
+        "tx_id": str(row["id"]),
         "user_id": str(row["user_id"]),
         "card_id": str(row["card_id"]),
         "issuer_code": issuer_numeric(row["issuer_code"]),
         "card_type": row["card_type"],
         "card_brand": row["card_brand"],
         "card_country": row["card_country"],
-        "amount": float(row["amount_usd"]),
+        "amount_usd": float(row["amount_usd"]),
         "channel": mapping_channel.get(row["channel"]),
         "billing_zone": row["billing_zone"],
         "billing_country": row["billing_country"],
@@ -98,7 +98,7 @@ def transaction_payload(
         "os_raw": row["os_raw"],
         "browser_raw": row["browser_raw"],
         "screen_resolution": row["screen_resolution"],
-        "created_at": iso_z(created_at),
+        "event_timestamp": iso_z(created_at),
         "C1": random.randint(1, 5),
         "C2": random.randint(1, 5),
         "C13": previous_transaction_count + 1,
@@ -173,9 +173,9 @@ def feature_payload(
     card_created_at = to_utc(newest["card_created_at"])
     last_txn_at = to_utc(newest["created_at"])
     return {
-        "no_transactions_30_days": len(rows),
-        "card_age_days": (now - card_created_at).total_seconds() / SECONDS_PER_DAY,
-        "no_days_since_last_txn": (now - last_txn_at).total_seconds() / SECONDS_PER_DAY,
+        "no_transactions_30_days": int(len(rows)),
+        "card_age_days": float((now - card_created_at).total_seconds() / SECONDS_PER_DAY),
+        "no_days_since_last_txn": float((now - last_txn_at).total_seconds() / SECONDS_PER_DAY),
         "card_created_at": iso_z(card_created_at),
         "last_txn_at": iso_z(last_txn_at),
     }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -13,6 +14,7 @@ from fraud_detection.core.utils import (
     MODEL_TO_CHANNEL,
     parse_datetime,
     to_float,
+    normalize_email,
 )
 from fraud_detection.features.feature_store import RedisFeatureStore
 from database.postgres import PostgresDatabase
@@ -133,14 +135,29 @@ class FraudDetectionService:
         return probability
 
     async def predict(self, inputs: FraudDetectionInputs) -> FraudDetectionOutputs:
-        current = inputs.model_dump(by_alias=True)
-        user_id = current.get("user_id", None)
-        card_id = current.get("card_id", None)
+        predict_started_at = perf_counter()
+
+        def log_time_perf(operation: str, started_at: float) -> None:
+            logger.debug(
+                "Fraud prediction operation timing",
+                extra={
+                    "operation": operation,
+                    "time_perf": round((perf_counter() - started_at) * 1000, 3),
+                    "time_unit": "milliseconds",
+                },
+            )
+
+        current_transaction = inputs.model_dump(by_alias=True)
+        user_id = current_transaction.get("user_id", None)
+        card_id = current_transaction.get("card_id", None)
 
         if user_id is None or card_id is None:
             raise ValueError("current_transaction must include user_id and card_id")
 
+        operation_started_at = perf_counter()
         redis_state = await self.feature_store.get_txs(user_id, card_id)
+        print(redis_state)
+        log_time_perf("fetch_redis_state", operation_started_at)
         if not redis_state.get("features") or not redis_state.get("transactions"):
             logger.warning(
                 "No Redis features or transactions found for user-card pair",
@@ -151,50 +168,58 @@ class FraudDetectionService:
             )
 
         try:
-            current = enrich_current_transaction_with_redis_features(current, redis_state)
-            redis_transaction = current
+            operation_started_at = perf_counter()
+            current_transaction = enrich_current_transaction_with_redis_features(current_transaction, redis_state)
+
+            normalized_email_transaction = normalize_email(current_transaction)
             payload = {
                 **redis_state,
-                "current_transaction": current,
+                "current_transaction": normalized_email_transaction,
             }
-            model_inputs, current, _, _, _ = build_model_inputs(
+            operation_started_at = perf_counter()
+            model_inputs = build_model_inputs(
                 payload,
                 self.schema,
             )
+            log_time_perf("build_model_inputs", operation_started_at)
         except Exception as exc:
             raise RuntimeError("Failed to build model inputs for prediction") from exc
 
+        operation_started_at = perf_counter()
         probability = await self.predict_with_kserve(model_inputs)
+        log_time_perf("kserve_inference", operation_started_at)
 
         status = "review" if probability >= self.threshold else "approved"
         logger.info(
             "Finished fraud prediction",
             extra={
-                "transaction_id": current.get("tx_id"),
+                "transaction_id": current_transaction.get("tx_id"),
                 "probability": probability,
                 "status": status,
             },
         )
 
-        record_to_save = {
-            **redis_transaction,
-            "status": status,
-        }
-
-        await self.save_transaction(record_to_save)
-        await self.feature_store.refresh_features_for_user_card(
-            user_id,
-            card_id,
-            redis_transaction,
-        )
-
+        # operation_started_at = perf_counter()
+        # await self.save_transaction(
+        #     transaction=current_transaction,
+        #     status=status,
+        # )
+        # log_time_perf("save_transaction", operation_started_at)
+        # operation_started_at = perf_counter()
+        # await self.feature_store.refresh_features_for_user_card(
+        #     user_id,
+        #     card_id,
+        #     normalized_email_transaction,
+        # )
+        # log_time_perf("refresh_redis_features", operation_started_at)
+        # log_time_perf("predict_total", predict_started_at)
         return FraudDetectionOutputs(
-            transaction_id=current.get("tx_id"),
+            tx_id=current_transaction.get("tx_id"),
             probability=probability,
             status=status,
         )
 
-    async def save_transaction(self, transaction: dict[str, Any]) -> None:
+    async def save_transaction(self, transaction: dict[str, Any], status: str) -> None:
         try:
             await self.database.execute(
                 """
@@ -223,12 +248,12 @@ class FraudDetectionService:
                 )
                 """,
                 (
-                    transaction["transaction_id"],
+                    transaction["tx_id"],
                     transaction["user_id"],
                     transaction["card_id"],
-                    transaction["status"],
-                    transaction["amount"],
-                    MODEL_TO_CHANNEL.get(transaction["channel"], transaction["channel"]),
+                    status,
+                    transaction["amount_usd"],
+                    transaction["channel"],
                     transaction["billing_zone"],
                     transaction["billing_country"],
                     transaction["email_purchaser"],

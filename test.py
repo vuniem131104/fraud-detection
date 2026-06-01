@@ -2,10 +2,35 @@ from redis import asyncio as aioredis
 import argparse
 import asyncio
 import json
+from typing import Any
 
 
 key_transactions = "user:card:transactions:{user_id}_{card_id}"
 key_features = "user:card:features:{user_id}_{card_id}"
+
+
+def decode_redis_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return value.decode()
+
+    return value
+
+
+def decode_features(values: dict[Any, Any]) -> dict[str, Any]:
+    feature_types = {
+        "no_transactions_30_days": int,
+        "card_age_days": float,
+        "no_days_since_last_txn": float,
+    }
+    decoded_features = {}
+    for key, value in values.items():
+        decoded_key = str(decode_redis_value(key))
+        decoded_value = decode_redis_value(value)
+        value_type = feature_types.get(decoded_key)
+        if value_type is not None:
+            decoded_value = value_type(decoded_value)
+        decoded_features[decoded_key] = decoded_value
+    return decoded_features
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,7 +54,8 @@ async def get_card_data(
     pipeline = redis_client.pipeline(transaction=False)
     pipeline.zrevrange(transactions_key, 0, -1)
     pipeline.hgetall(features_key)
-    transactions_raw, features = await pipeline.execute()
+    transactions_raw, features_raw = await pipeline.execute()
+    features = decode_features(features_raw)
 
     return {
         "user_id": user_id,
