@@ -20,3 +20,8 @@ dependencies = [
     "httpx==0.28.1",
     "asyncpg>=0.31.0",
 ]
+
+[dependency-groups]
+dev = [
+    "locust==2.44.0",
+]

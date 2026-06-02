@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter
 from typing import Any
 
+import asyncio
 import httpx
+import pandas as pd
 from structlog import get_logger
 
 from fraud_detection.core.utils import (
     build_model_inputs,
     enrich_current_transaction_with_redis_features,
-    MODEL_TO_CHANNEL,
     parse_datetime,
-    to_float,
     normalize_email,
 )
 from fraud_detection.features.feature_store import RedisFeatureStore
@@ -36,17 +38,54 @@ class FraudDetectionService:
         self.schema = schema
         self.feature_store = feature_store
         self.database = database
+        self.feature_build_executor = ThreadPoolExecutor(
+            max_workers=int(os.getenv("FEATURE_BUILD_WORKERS", "1")),
+            thread_name_prefix="fraud-feature-build",
+        )
         self.kserve_url = os.getenv("KSERVE_URL", "")
         if not self.kserve_url:
             logger.error("KSERVE_URL environment variable is not set")
             raise ValueError("KSERVE_URL environment variable is not set")
         self.threshold = threshold
+        self.kserve_timeout_s = float(os.getenv("KSERVE_TIMEOUT_S", "30"))
+        self.kserve_client = httpx.AsyncClient(
+            timeout=self.kserve_timeout_s,
+            limits=httpx.Limits(
+                max_connections=int(os.getenv("KSERVE_MAX_CONNECTIONS", "100")),
+                max_keepalive_connections=int(
+                    os.getenv("KSERVE_MAX_KEEPALIVE_CONNECTIONS", "100")
+                ),
+            ),
+        )
+
+    async def close(self) -> None:
+        await self.kserve_client.aclose()
+        self.feature_build_executor.shutdown(wait=True, cancel_futures=True)
+
+    @staticmethod
+    def to_float(value: Any, feature: str, default: float = 0.0) -> float:
+        if value is None or pd.isna(value):
+            return default
+        if isinstance(value, str) and not value.strip():
+            return default
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "Invalid numeric feature value",
+                extra={
+                    "feature": feature,
+                    "value": repr(value),
+                },
+            )
+            raise ValueError(f"Feature {feature!r} must be numeric, got {value!r}") from exc
+        return number if math.isfinite(number) else default
 
     async def predict_with_kserve(self, model_inputs: Any) -> float:
         rows = model_inputs.to_dict(orient="records")
         feature_names = list(model_inputs.columns)
         data = [
-            [to_float(row.get(feature), feature) for feature in feature_names]
+            [self.to_float(row.get(feature), feature) for feature in feature_names]
             for row in rows
         ]
         payload = {
@@ -69,8 +108,7 @@ class FraudDetectionService:
                     "feature_count": len(feature_names),
                 },
             )
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(self.kserve_url, json=payload)
+            response = await self.kserve_client.post(self.kserve_url, json=payload)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             logger.exception(
@@ -89,7 +127,7 @@ class FraudDetectionService:
                 "KServe inference request timed out",
                 extra={
                     "kserve_url": self.kserve_url,
-                    "timeout_seconds": 30.0,
+                    "timeout_seconds": self.kserve_timeout_s,
                 },
             )
             raise RuntimeError("KServe inference request timed out") from exc
@@ -156,7 +194,6 @@ class FraudDetectionService:
 
         operation_started_at = perf_counter()
         redis_state = await self.feature_store.get_txs(user_id, card_id)
-        print(redis_state)
         log_time_perf("fetch_redis_state", operation_started_at)
         if not redis_state.get("features") or not redis_state.get("transactions"):
             logger.warning(
@@ -177,7 +214,9 @@ class FraudDetectionService:
                 "current_transaction": normalized_email_transaction,
             }
             operation_started_at = perf_counter()
-            model_inputs = build_model_inputs(
+            model_inputs = await asyncio.get_running_loop().run_in_executor(
+                self.feature_build_executor,
+                build_model_inputs,
                 payload,
                 self.schema,
             )
@@ -199,20 +238,20 @@ class FraudDetectionService:
             },
         )
 
-        # operation_started_at = perf_counter()
-        # await self.save_transaction(
-        #     transaction=current_transaction,
-        #     status=status,
-        # )
-        # log_time_perf("save_transaction", operation_started_at)
-        # operation_started_at = perf_counter()
-        # await self.feature_store.refresh_features_for_user_card(
-        #     user_id,
-        #     card_id,
-        #     normalized_email_transaction,
-        # )
-        # log_time_perf("refresh_redis_features", operation_started_at)
-        # log_time_perf("predict_total", predict_started_at)
+        operation_started_at = perf_counter()
+        await asyncio.gather(
+            self.feature_store.refresh_features_for_user_card(
+                user_id,
+                card_id,
+                normalized_email_transaction,
+            ),
+            self.save_transaction(
+                transaction=current_transaction,
+                status=status,
+            ),
+        )
+        log_time_perf("refresh_redis_features_and_save_transaction", operation_started_at)
+        log_time_perf("predict_total", predict_started_at)
         return FraudDetectionOutputs(
             tx_id=current_transaction.get("tx_id"),
             probability=probability,
