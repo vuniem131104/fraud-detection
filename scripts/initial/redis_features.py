@@ -87,6 +87,7 @@ def transaction_payload(
         "card_type": row["card_type"],
         "card_brand": row["card_brand"],
         "card_country": row["card_country"],
+        "bin_code": row["card_bin_code"],
         "amount_usd": float(row["amount_usd"]),
         "channel": mapping_channel.get(row["channel"]),
         "billing_zone": row["billing_zone"],
@@ -145,6 +146,7 @@ async def get_data_from_postgres(
                 c.issuer_code,
                 c.type AS card_type,
                 c.brand AS card_brand,
+                c.bin_code AS card_bin_code,
                 c.country AS card_country,
                 c.created_at AS card_created_at
             FROM application.transactions AS t

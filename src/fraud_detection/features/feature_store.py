@@ -67,8 +67,10 @@ class RedisFeatureStore:
                     "card_id": card_id,
                 }
             )
-            transaction_values = await self.redis_client.zrevrange(transactions_key, 0, -1)
-            feature_values = await self.redis_client.hgetall(features_key)
+            async with self.redis_client.pipeline(transaction=False) as pipeline:
+                pipeline.zrevrange(transactions_key, 0, -1)
+                pipeline.hgetall(features_key)
+                transaction_values, feature_values = await pipeline.execute()
             features = self.decode_features(feature_values)
             transactions = [
                 self.decode_transaction(value) for value in transaction_values
@@ -184,3 +186,24 @@ class RedisFeatureStore:
                     "error": str(e),
                 }
             )
+
+
+# if __name__ == "__main__":
+#     import os
+#     import asyncio
+#     async def main():
+#         redis_client = aioredis.Redis(
+#             host=os.getenv("REDIS_HOST"),
+#             port=int(os.getenv("REDIS_PORT")),
+#             db=int(os.getenv("REDIS_DB" )),
+#             decode_responses=True,
+#         )
+#         feature_store = RedisFeatureStore(redis_client)
+#         result = await feature_store.get_txs(
+#             user_id="00e810e4ad7246eea0cc9e9537a19b5c",
+#             card_id="de8d32b54ba14e959366cd1d495e78df",
+#         )
+#         print(json.dumps(result, indent=2))
+#         await redis_client.aclose()
+        
+#     asyncio.run(main())

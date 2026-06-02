@@ -11,7 +11,7 @@ class FraudDetectionInputs(BaseModel):
     card_country: int = Field(ge=0)
     issuer_code: int = Field(ge=0)
     card_brand: str = Field(min_length=1)
-    bin_code: int = Field(ge=0)
+    bin_code: str = Field(min_length=1)
     card_type: str = Field(min_length=1)
     billing_zone: int = Field(ge=0)
     billing_country: int = Field(ge=0)
