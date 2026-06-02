@@ -1,0 +1,21 @@
+modelName: fraud-detection-model
+
+autoscaling:
+  minReplicas: 0
+  maxReplicas: 5
+  scaleTarget: 10
+  scaleToZeroPodRetentionPeriod: "900s"
+
+resources:
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"
+  requests:
+    cpu: "500m"
+    memory: "0.5Gi"
+
+serviceAccount:
+  name: kserve-sa
+
+predictor:
+  storageUri: "gs://model_aide/fraud_detection/v1"

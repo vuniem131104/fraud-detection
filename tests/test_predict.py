@@ -115,8 +115,8 @@ def build_anomalous_current_transaction(
     }
 
 async def main_async() -> int:
-    user_id = "ae95b60b27494f369895c3788c13fd10"
-    card_id = "0bb154c4a91d480f84f3d7e5cdc9b96c"
+    user_id = "6cf25546617f4aa3b388f8cabb224ca7"
+    card_id = "9a2b20f41614408c97ac7ddea07811e7"
     redis_client = aioredis.Redis(
         host=os.getenv("REDIS_HOST"),
         port=int(os.getenv("REDIS_PORT")),

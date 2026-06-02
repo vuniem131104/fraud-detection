@@ -1,0 +1,24 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: {{ .Values.modelName }}
+  annotations:
+    autoscaling.knative.dev/min-scale: "{{ .Values.autoscaling.minReplicas }}"
+    autoscaling.knative.dev/max-scale: "{{ .Values.autoscaling.maxReplicas }}"
+    autoscaling.knative.dev/scale-to-zero-pod-retention-period: {{ .Values.autoscaling.scaleToZeroPodRetentionPeriod }}
+    autoscaling.knative.dev/target: "{{ .Values.autoscaling.scaleTarget }}"
+spec:
+  predictor:
+    serviceAccountName: {{ .Values.serviceAccount.name }}
+    model:
+      modelFormat:
+        name: lightgbm
+      protocolVersion: v2
+      storageUri: {{ .Values.predictor.storageUri }}
+      resources:
+        limits:
+          cpu: {{ .Values.resources.limits.cpu }}
+          memory: {{ .Values.resources.limits.memory }}
+        requests:
+          cpu: {{ .Values.resources.requests.cpu }}
+          memory: {{ .Values.resources.requests.memory }}

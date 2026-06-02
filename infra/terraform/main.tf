@@ -90,3 +90,21 @@ resource "google_sql_database" "main" {
   project  = var.project_id
   instance = google_sql_database_instance.postgres.name
 }
+
+resource "google_service_account" "fraud_detection_kserve" {
+  account_id   = "kserve"
+  display_name = "KServe"
+  project      = var.project_id
+}
+
+resource "google_storage_bucket_iam_member" "fraud_detection_kserve_model_storage_reader" {
+  bucket = var.bucket_name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.fraud_detection_kserve.email}"
+}
+
+resource "google_service_account_iam_member" "fraud_detection_kserve_workload_identity" {
+  service_account_id = google_service_account.fraud_detection_kserve.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[fraud/kserve-sa]"
+}
