@@ -23,47 +23,47 @@ services:
   #     --backend-store-uri postgresql://$$POSTGRES_USER:$$POSTGRES_PASSWORD@$$POSTGRES_HOST:$$POSTGRES_PORT/$$POSTGRES_DB
   #     --default-artifact-root $$MLFLOW_ARTIFACT_ROOT"
 
-  # redpanda:
-  #   image: docker.redpanda.com/redpandadata/redpanda:v26.1.9
-  #   command:
-  #     - redpanda
-  #     - start
-  #     - --smp
-  #     - "1"
-  #     - --overprovisioned
-  #     - --node-id
-  #     - "0"
-  #     - --kafka-addr
-  #     - PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
-  #     - --advertise-kafka-addr
-  #     - PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
-  #     - --pandaproxy-addr
-  #     - 0.0.0.0:8082
-  #     - --advertise-pandaproxy-addr
-  #     - localhost:8082
-  #   ports:
-  #     - 8081:8081
-  #     - 8082:8082
-  #     - 9092:9092
-  #     - 29092:29092
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.1.9
+    command:
+      - redpanda
+      - start
+      - --smp
+      - "1"
+      - --overprovisioned
+      - --node-id
+      - "0"
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --pandaproxy-addr
+      - 0.0.0.0:8082
+      - --advertise-pandaproxy-addr
+      - localhost:8082
+    ports:
+      - 8081:8081
+      - 8082:8082
+      - 9092:9092
+      - 29092:29092
 
-  # console:
-  #   image: docker.redpanda.com/redpandadata/console:v2.8.13
-  #   restart: on-failure
-  #   entrypoint: /bin/sh
-  #   command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml; /app/console"
-  #   environment:
-  #     CONFIG_FILEPATH: /tmp/config.yml
-  #     CONSOLE_CONFIG_FILE: |
-  #       kafka:
-  #         brokers: ["redpanda:29092"]
-  #         schemaRegistry:
-  #           enabled: true
-  #           urls: ["http://redpanda:8081"]
-  #   ports:
-  #     - "8080:8080"
-  #   depends_on:
-  #     - redpanda
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.8.13
+    restart: on-failure
+    entrypoint: /bin/sh
+    command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml; /app/console"
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda:29092"]
+          schemaRegistry:
+            enabled: true
+            urls: ["http://redpanda:8081"]
+    ports:
+      - "8090:8080"
+    depends_on:
+      - redpanda
 
   postgres:
     image: postgres:16

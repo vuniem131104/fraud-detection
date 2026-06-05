@@ -98,7 +98,7 @@ resource "google_service_account" "fraud_detection_kserve" {
 }
 
 resource "google_storage_bucket_iam_member" "fraud_detection_kserve_model_storage_reader" {
-  bucket = var.bucket_name
+  bucket = var.model_storage_bucket_name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.fraud_detection_kserve.email}"
 }
@@ -106,5 +106,5 @@ resource "google_storage_bucket_iam_member" "fraud_detection_kserve_model_storag
 resource "google_service_account_iam_member" "fraud_detection_kserve_workload_identity" {
   service_account_id = google_service_account.fraud_detection_kserve.name
   role               = "roles/iam.workloadIdentityUser"
-  member             = "serviceAccount:${var.project_id}.svc.id.goog[fraud/kserve-sa]"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[model/kserve-sa]"
 }
