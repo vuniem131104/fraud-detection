@@ -115,8 +115,8 @@ def build_anomalous_current_transaction(
     }
 
 async def main_async() -> int:
-    user_id = "6cf25546617f4aa3b388f8cabb224ca7"
-    card_id = "9a2b20f41614408c97ac7ddea07811e7"
+    user_id = "a9464a7a6cc449c8ae6eb676046b06bf"
+    card_id = "110bb7ca0f7c4cc38729a69dace818b5"
     redis_client = aioredis.Redis(
         host=os.getenv("REDIS_HOST"),
         port=int(os.getenv("REDIS_PORT")),
@@ -127,17 +127,16 @@ async def main_async() -> int:
     schema = load_schema(model_dir="/home/lehoangvu/fraud-detection/models")
     service: FraudDetectionService | None = None
     try:
-        await postgres_client.open()
-        await redis_client.ping()
         feature_store = RedisFeatureStore(redis_client)
-        card_profile = await load_card_profile(postgres_client, user_id, card_id)
-        redis_state = await feature_store.get_txs(user_id, card_id)
         service = FraudDetectionService(
             schema=schema,
             feature_store=feature_store,
             database=postgres_client,
             threshold=0.5,
         )
+        await service.open()
+        card_profile = await load_card_profile(postgres_client, user_id, card_id)
+        redis_state = await feature_store.get_txs(user_id, card_id)
         current_transaction = build_anomalous_current_transaction(
             user_id=user_id,
             card_id=card_id,
@@ -169,8 +168,9 @@ async def main_async() -> int:
     finally:
         if service is not None:
             await service.close()
-        await postgres_client.close()
-        await redis_client.aclose()
+        else:
+            await postgres_client.close()
+            await redis_client.aclose()
 
     result = {
         "tx_id": details.tx_id,

@@ -45,9 +45,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         schema = json.load(schema_file)
 
     try:
-        await database.open()
-        await redis_client.ping()
-
         feature_store = RedisFeatureStore(redis_client)
         app.state.database = database
         app.state.redis_client = redis_client
@@ -57,13 +54,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             database=database,
             threshold=0.5,
         )
+        await fraud_detection_service.open()
         app.state.fraud_detection_service = fraud_detection_service
         yield
     finally:
-        if fraud_detection_service is not None:
-            await fraud_detection_service.close()
-        await redis_client.aclose()
-        await database.close()
+        await fraud_detection_service.close()
 
 
 app = FastAPI(

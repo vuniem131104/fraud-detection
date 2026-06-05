@@ -67,10 +67,6 @@ def to_float(value: Any, feature: str, default: float | None = None) -> float | 
     return number if math.isfinite(number) else default
 
 
-def parse_datetime(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-
 def to_int_like(value: Any, default: int = 0) -> int:
     number = to_number(value, default=float(default))
     if math.isnan(number):

@@ -7,6 +7,9 @@ metadata:
     autoscaling.knative.dev/max-scale: "{{ .Values.autoscaling.maxReplicas }}"
     autoscaling.knative.dev/scale-to-zero-pod-retention-period: {{ .Values.autoscaling.scaleToZeroPodRetentionPeriod }}
     autoscaling.knative.dev/target: "{{ .Values.autoscaling.scaleTarget }}"
+    {{- with .Values.predictor.storageSecretName }}
+    serving.kserve.io/storageSecretName: {{ . | quote }}
+    {{- end }}
 spec:
   predictor:
     serviceAccountName: {{ .Values.serviceAccount.name }}

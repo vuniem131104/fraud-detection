@@ -5,7 +5,7 @@ import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter
-from typing import Any
+from typing import Any, Optional
 
 import asyncio
 import httpx
@@ -15,7 +15,6 @@ from structlog import get_logger
 from fraud_detection.core.utils import (
     build_model_inputs,
     enrich_current_transaction_with_redis_features,
-    parse_datetime,
     normalize_email,
 )
 from fraud_detection.features.feature_store import RedisFeatureStore
@@ -24,6 +23,8 @@ from fraud_detection.core.models import (
     FraudDetectionInputs,
     FraudDetectionOutputs,
 )
+from aiokafka import AIOKafkaProducer
+from uuid import uuid4
 
 logger = get_logger(__name__)
 
@@ -57,11 +58,28 @@ class FraudDetectionService:
                 ),
             ),
         )
+        self.producer: Optional[AIOKafkaProducer] = None
+        self.predictions_topic = os.getenv("PREDICTIONS_TOPIC", "fraud_predictions")
+
+    async def open(self) -> None:
+        await self.database.open()
+        await self.feature_store.redis_client.ping()
+        await self.kserve_client.__aenter__()
+        self.producer = AIOKafkaProducer(
+            bootstrap_servers=os.getenv("BOOTSTRAP_SERVERS", "localhost:9092")
+        )
+        await self.producer.start()
+        logger.info("FraudDetectionService is ready")
 
     async def close(self) -> None:
+        await self.database.close()
+        await self.feature_store.redis_client.aclose()
         await self.kserve_client.aclose()
+        if self.producer:
+            await self.producer.stop()
         self.feature_build_executor.shutdown(wait=True, cancel_futures=True)
-
+        logger.info("FraudDetectionService has been closed")
+        
     @staticmethod
     def to_float(value: Any, feature: str, default: float = 0.0) -> float:
         if value is None or pd.isna(value):
@@ -173,6 +191,7 @@ class FraudDetectionService:
         return probability
 
     async def predict(self, inputs: FraudDetectionInputs) -> FraudDetectionOutputs:
+        request_id = uuid4().hex
         predict_started_at = perf_counter()
 
         def log_time_perf(operation: str, started_at: float) -> None:
@@ -232,95 +251,44 @@ class FraudDetectionService:
         logger.info(
             "Finished fraud prediction",
             extra={
+                "request_id": request_id,
                 "transaction_id": current_transaction.get("tx_id"),
                 "probability": probability,
                 "status": status,
             },
         )
+        
+        try:
+            await self.producer.send_and_wait(
+                self.predictions_topic,
+                value=json.dumps({
+                    "request_id": request_id,
+                    "probability": probability,
+                    "status": status,
+                    **current_transaction,
+                }).encode("utf-8"),
+                key=request_id.encode(),
+            )
+            logger.info(
+                "Sent prediction result to Kafka",
+                extra={
+                    "request_id": request_id,
+                    "transaction_id": current_transaction.get("tx_id"),
+                },
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to send prediction result to Kafka",
+                extra={
+                    "request_id": request_id,
+                    "transaction_id": current_transaction.get("tx_id"),
+                    "error": str(e),
+                },
+            )
 
-        operation_started_at = perf_counter()
-        await asyncio.gather(
-            self.feature_store.refresh_features_for_user_card(
-                user_id,
-                card_id,
-                normalized_email_transaction,
-            ),
-            self.save_transaction(
-                transaction=current_transaction,
-                status=status,
-            ),
-        )
-        log_time_perf("refresh_redis_features_and_save_transaction", operation_started_at)
         log_time_perf("predict_total", predict_started_at)
         return FraudDetectionOutputs(
             tx_id=current_transaction.get("tx_id"),
             probability=probability,
             status=status,
-        )
-
-    async def save_transaction(self, transaction: dict[str, Any], status: str) -> None:
-        try:
-            await self.database.execute(
-                """
-                INSERT INTO application.transactions
-                    (
-                        id,
-                        user_id,
-                        card_id,
-                        status,
-                        amount_usd,
-                        channel,
-                        billing_zone,
-                        billing_country,
-                        email_purchaser,
-                        email_recipient,
-                        device_info,
-                        device_type,
-                        os_raw,
-                        browser_raw,
-                        screen_resolution,
-                        created_at
-                )
-                VALUES (
-                    $1, $2, $3, $4, $5, $6, $7,
-                    $8, $9, $10, $11, $12, $13, $14, $15, $16
-                )
-                """,
-                (
-                    transaction["tx_id"],
-                    transaction["user_id"],
-                    transaction["card_id"],
-                    status,
-                    transaction["amount_usd"],
-                    transaction["channel"],
-                    transaction["billing_zone"],
-                    transaction["billing_country"],
-                    transaction["email_purchaser"],
-                    transaction["email_recipient"],
-                    transaction["device_info"],
-                    transaction["device_type"],
-                    transaction["os_raw"],
-                    transaction["browser_raw"],
-                    transaction["screen_resolution"],
-                    parse_datetime(transaction["event_timestamp"]),
-                ),
-            )
-        except Exception:
-            logger.exception(
-                "Failed to save transaction",
-                extra={
-                    "user_id": transaction.get("user_id"),
-                    "card_id": transaction.get("card_id"),
-                    "status": transaction.get("status"),
-                },
-            )
-            raise
-
-        logger.info(
-            "Saved transaction",
-            extra={
-                "user_id": transaction.get("user_id"),
-                "card_id": transaction.get("card_id"),
-                "status": transaction.get("status"),
-            },
         )

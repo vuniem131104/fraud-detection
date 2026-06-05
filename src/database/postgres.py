@@ -42,7 +42,7 @@ class PostgresDatabase:
         missing = [name for name, value in values.items() if not value]
         if missing:
             raise ValueError(f"Missing Postgres environment variables: {', '.join(missing)}")
-
+        
         return cls(
             port=int(values["POSTGRES_PORT"]),
             user=values["POSTGRES_USER"],

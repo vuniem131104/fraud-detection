@@ -18,4 +18,4 @@ serviceAccount:
   name: kserve-sa
 
 predictor:
-  storageUri: "gs://model_aide/fraud_detection/v1"
+  storageUri: "gs://fraud-detection-aide/mlflow-artifacts/2/a045358744774bb5bad9393d04aaf7e6/artifacts"
