@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import timedelta, timezone
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from structlog import get_logger
-from datetime import datetime, UTC
 
 
 logger = get_logger(__name__)
+HO_CHI_MINH_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
 
 EMAIL_BIN = {
     "gmail.com": "google",
@@ -84,12 +84,12 @@ def to_model_card_id(value: Any, default: int = 0) -> int:
     return to_int_like(value, default=default)
 
 
-def utc_timestamp(value: Any) -> pd.Timestamp:
+def local_timestamp(value: Any) -> pd.Timestamp:
     if value is None:
         raise ValueError("Transaction must include created_at or event_timestamp")
     timestamp = pd.Timestamp(value)
     if timestamp.tzinfo is not None:
-        timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+        timestamp = timestamp.tz_convert(HO_CHI_MINH_TZ).tz_localize(None)
     return timestamp
 
 
@@ -100,7 +100,7 @@ def event_offset_seconds(row: dict[str, Any], schema: dict[str, Any]) -> float:
 
     event_timestamp = row.get("event_timestamp")
     reference = pd.Timestamp(schema["training_reference_ts"])
-    return float((utc_timestamp(event_timestamp) - reference).total_seconds())
+    return float((local_timestamp(event_timestamp) - reference).total_seconds())
 
 
 def normalize_transaction(

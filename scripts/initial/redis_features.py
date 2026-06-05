@@ -6,7 +6,7 @@ import json
 import random
 import sys
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,7 @@ DEFAULT_REDIS_HOST = "localhost"
 DEFAULT_REDIS_PORT = 6379
 DEFAULT_REDIS_DB = 0
 SECONDS_PER_DAY = 24 * 60 * 60
+HO_CHI_MINH_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
 
 
 def redis_transactions_key(user_id: str, card_id: str) -> str:
@@ -32,23 +33,23 @@ def redis_features_key(user_id: str, card_id: str) -> str:
     return f"user:card:features:{user_id}_{card_id}"
 
 
-def utc_now() -> datetime:
-    return datetime.now(UTC)
+def local_now() -> datetime:
+    return datetime.now(HO_CHI_MINH_TZ)
 
 
-def to_utc(value: datetime) -> datetime:
+def to_local_time(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+        return value.replace(tzinfo=HO_CHI_MINH_TZ)
+    return value.astimezone(HO_CHI_MINH_TZ)
 
 
-def iso_z(value: datetime) -> str:
-    return to_utc(value).isoformat().replace("+00:00", "Z")
+def iso_local(value: datetime) -> str:
+    return to_local_time(value).isoformat()
 
 
 def json_default(value: Any) -> Any:
     if isinstance(value, datetime):
-        return iso_z(value)
+        return iso_local(value)
     if isinstance(value, Decimal):
         return float(value)
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
@@ -62,7 +63,7 @@ mapping_channel = {
 
 
 def days_between(start: datetime, end: datetime) -> float:
-    elapsed_days = (to_utc(end) - to_utc(start)).total_seconds() / SECONDS_PER_DAY
+    elapsed_days = (to_local_time(end) - to_local_time(start)).total_seconds() / SECONDS_PER_DAY
     return round(max(elapsed_days, 0.0), 4)
 
 
@@ -77,8 +78,8 @@ def transaction_payload(
     previous_transaction_count: int,
     previous_created_at: datetime,
 ) -> dict[str, Any]:
-    created_at = to_utc(row["created_at"])
-    card_created_at = to_utc(row["card_created_at"])
+    created_at = to_local_time(row["created_at"])
+    card_created_at = to_local_time(row["card_created_at"])
     return {
         "tx_id": str(row["id"]),
         "user_id": str(row["user_id"]),
@@ -99,7 +100,7 @@ def transaction_payload(
         "os_raw": row["os_raw"],
         "browser_raw": row["browser_raw"],
         "screen_resolution": row["screen_resolution"],
-        "event_timestamp": iso_z(created_at),
+        "event_timestamp": iso_local(created_at),
         "C1": random.randint(1, 5),
         "C2": random.randint(1, 5),
         "C13": previous_transaction_count + 1,
@@ -120,7 +121,7 @@ async def get_data_from_postgres(
     if lookback_days < 1:
         raise ValueError("lookback_days must be greater than 0")
 
-    now = now or utc_now()
+    now = now or local_now()
     cutoff = now - timedelta(days=lookback_days)
     grouped_transactions: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
 
@@ -172,14 +173,15 @@ def feature_payload(
     now: datetime,
 ) -> dict[str, Any]:
     newest = rows[0]
-    card_created_at = to_utc(newest["card_created_at"])
-    last_txn_at = to_utc(newest["created_at"])
+    now = to_local_time(now)
+    card_created_at = to_local_time(newest["card_created_at"])
+    last_txn_at = to_local_time(newest["created_at"])
     return {
         "no_transactions_30_days": int(len(rows)),
         "card_age_days": float((now - card_created_at).total_seconds() / SECONDS_PER_DAY),
         "no_days_since_last_txn": float((now - last_txn_at).total_seconds() / SECONDS_PER_DAY),
-        "card_created_at": iso_z(card_created_at),
-        "last_txn_at": iso_z(last_txn_at),
+        "card_created_at": iso_local(card_created_at),
+        "last_txn_at": iso_local(last_txn_at),
     }
 
 
@@ -199,7 +201,7 @@ async def store_grouped_transactions(
             raise RuntimeError("Missing dependency: install the redis Python package") from exc
         raise
 
-    now = now or utc_now()
+    now = now or local_now()
     redis_client = aioredis.Redis(host=host, port=port, db=db, decode_responses=True)
     stored_count = 0
 
@@ -217,14 +219,14 @@ async def store_grouped_transactions(
             chronological_rows = sorted(rows, key=lambda row: row["created_at"])
             previous_created_by_id: dict[str, datetime] = {}
             previous_count_by_id: dict[str, int] = {}
-            previous_created_at = to_utc(chronological_rows[0]["card_created_at"])
+            previous_created_at = to_local_time(chronological_rows[0]["card_created_at"])
             for previous_transaction_count, row in enumerate(chronological_rows):
                 previous_created_by_id[row["id"]] = previous_created_at
                 previous_count_by_id[row["id"]] = previous_transaction_count
-                previous_created_at = to_utc(row["created_at"])
+                previous_created_at = to_local_time(row["created_at"])
 
             for row in rows:
-                created_at = to_utc(row["created_at"])
+                created_at = to_local_time(row["created_at"])
                 pipeline.zadd(
                     transactions_key,
                     {
@@ -271,7 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def main() -> None:
     args = build_parser().parse_args()
-    now = utc_now()
+    now = local_now()
     database = PostgresDatabase.from_env()
     await database.open()
     try:

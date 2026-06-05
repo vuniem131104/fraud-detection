@@ -1,6 +1,6 @@
 import os
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +19,7 @@ from structlog import get_logger
 from typing import Any
 
 logger = get_logger(__name__)
+HO_CHI_MINH_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
 
 def load_schema(model_dir: str) -> dict[str, Any]:
     schema_path = Path(model_dir)  / "feature_schema.json"
@@ -79,7 +80,7 @@ def build_anomalous_current_transaction(
 
     timestamp = (
         event_timestamp
-        or datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        or datetime.now(HO_CHI_MINH_TZ).replace(microsecond=0).isoformat()
     )
     tx_id = uuid4().hex
 
@@ -115,8 +116,8 @@ def build_anomalous_current_transaction(
     }
 
 async def main_async() -> int:
-    user_id = "a9464a7a6cc449c8ae6eb676046b06bf"
-    card_id = "110bb7ca0f7c4cc38729a69dace818b5"
+    user_id = "18368ef39e7443dfb21279fc8dee5706"
+    card_id = "6f192c41a6be4805b0f079cd8f11f959"
     redis_client = aioredis.Redis(
         host=os.getenv("REDIS_HOST"),
         port=int(os.getenv("REDIS_PORT")),

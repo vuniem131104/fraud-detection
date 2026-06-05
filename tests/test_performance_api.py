@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import UTC, datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -31,6 +31,7 @@ from locust.runners import MasterRunner
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENTITY_LIMIT = int(os.getenv("LOCUST_ENTITY_LIMIT", "500"))
 RPS_PER_USER = float(os.getenv("LOCUST_RPS_PER_USER", "1"))
+HO_CHI_MINH_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
 
 _entities: list[tuple[str, str]] = []
 _entity_index = 0
@@ -101,7 +102,7 @@ def next_entity() -> tuple[str, str]:
 def build_payload(transaction_id: str, user_id: str, card_id: str) -> dict[str, Any]:
     return {
         "transaction_id": transaction_id,
-        "event_timestamp": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "event_timestamp": datetime.now(HO_CHI_MINH_TZ).replace(microsecond=0).isoformat(),
         "amount": 10.99,
         "channel": "C",
         "user_id": user_id,
