@@ -10,6 +10,7 @@ TRANSACTIONS_KEY_PREFIX = "user:card:transactions:"
 FEATURES_KEY_PREFIX = "user:card:features:"
 TRANSACTIONS_KEY_PATTERN = f"{TRANSACTIONS_KEY_PREFIX}*"
 SECONDS_PER_DAY = 24 * 60 * 60
+HO_CHI_MINH_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
 
 refresh_key_script = """
 local removed = redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, ARGV[1])
@@ -38,8 +39,19 @@ def features_key_from_transactions_key(transactions_key: str) -> str:
     return f"{FEATURES_KEY_PREFIX}{transactions_key.removeprefix(TRANSACTIONS_KEY_PREFIX)}"
 
 
+def local_now() -> datetime:
+    return datetime.now(HO_CHI_MINH_TZ)
+
+
+def to_local_time(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=HO_CHI_MINH_TZ)
+    return value.astimezone(HO_CHI_MINH_TZ)
+
+
 def parse_datetime(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return to_local_time(timestamp)
 
 
 def days_between(start: datetime, end: datetime) -> float:
@@ -100,7 +112,7 @@ async def refresh_redis_data(
     if scan_count < 1:
         raise ValueError("scan_count must be greater than 0")
 
-    now = datetime.now(timezone.utc)
+    now = local_now()
     cutoff = now - timedelta(days=cutoff_days)
     cutoff_score = int(cutoff.timestamp())
     semaphore = asyncio.Semaphore(concurrency)

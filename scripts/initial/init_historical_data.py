@@ -7,7 +7,7 @@ import os
 import random
 import shutil
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -111,6 +111,7 @@ DEFAULT_CARD_COUNT = 1_200
 DEFAULT_CARD_SEED = 42
 DEFAULT_TRANSACTION_COUNT = 10_000
 DEFAULT_TRANSACTION_SEED = 99
+HO_CHI_MINH_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
 
 COUNTRIES = [
     (840, 1),  # US, North America
@@ -154,6 +155,16 @@ def domains() -> list[str]:
     return [*EMAIL_BIN.keys(), *sorted(EMAIL_NULLS)]
 
 
+def local_now() -> datetime:
+    return datetime.now(HO_CHI_MINH_TZ)
+
+
+def to_local_time(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=HO_CHI_MINH_TZ)
+    return value.astimezone(HO_CHI_MINH_TZ)
+
+
 def salt_for(index: int) -> bytes:
     return hashlib.sha256(f"fake-user:{index}".encode("utf-8")).digest()[:16]
 
@@ -169,7 +180,7 @@ def hash_password(password: str, salt: bytes) -> str:
 
 def fake_users(count: int, password: str) -> list[tuple[str, str, str, str, str, datetime]]:
     available_domains = domains()
-    base_time = datetime.now(UTC).replace(microsecond=0) - timedelta(days=count)
+    base_time = local_now().replace(microsecond=0) - timedelta(days=count)
     rows = []
 
     for index in range(1, count + 1):
@@ -328,7 +339,7 @@ async def seed_cards(
     replace: bool,
 ) -> tuple[int, int]:
     rng = random.Random(seed)
-    now = datetime.now(UTC).replace(microsecond=0)
+    now = local_now().replace(microsecond=0)
 
     async with database.transaction() as conn:
         users = await conn.fetch(
@@ -474,7 +485,7 @@ async def seed_transactions(
         raise ValueError("--anomaly-count must be lower than --transaction-count")
 
     rng = random.Random(seed)
-    now = datetime.now(UTC).replace(microsecond=0)
+    now = local_now().replace(microsecond=0)
     normal_count = transaction_count - anomaly_count
     minimum_history_count = anomaly_count * 3
     if normal_count < minimum_history_count:
@@ -623,10 +634,8 @@ async def seed_transactions(
     return normal_count, anomaly_count
 
 
-def iso_z(dt: datetime) -> str:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
+def iso_local(dt: datetime) -> str:
+    return to_local_time(dt).isoformat()
 
 
 def email_domain(email: str) -> str:
@@ -646,7 +655,7 @@ def history_row(tx: dict, card: dict, history_index: int) -> dict:
     card_age_days = max((tx["created_at"].date() - card["card_created_at"].date()).days, 0)
     return {
         "tx_id": numeric_uuid(tx["id"]),
-        "event_timestamp": iso_z(tx["created_at"]),
+        "event_timestamp": iso_local(tx["created_at"]),
         "amount_usd": float(tx["amount_usd"]),
         "channel": model_channel(tx["channel"]),
         "card_id": numeric_uuid(card["id"]),
@@ -706,7 +715,7 @@ def anomaly_row(tx: dict, card: dict, history_count: int) -> dict:
     days_since_last_tx = max((tx["created_at"] - last_tx_at).total_seconds() / 86400, 0.0)
     return {
         "tx_id": numeric_uuid(tx["id"]),
-        "event_timestamp": iso_z(tx["created_at"]),
+        "event_timestamp": iso_local(tx["created_at"]),
         "amount_usd": float(tx["amount_usd"]),
         "channel": model_channel(tx["channel"]),
         "card_id": numeric_uuid(card["id"]),
