@@ -39,7 +39,6 @@ CREATE TABLE application.users (
     name TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    salt TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -70,6 +69,7 @@ CREATE TABLE application.transactions (
     os_raw TEXT,
     browser_raw TEXT,
     screen_resolution TEXT,
+    latency DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (latency >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -165,20 +165,16 @@ def to_local_time(value: datetime) -> datetime:
     return value.astimezone(HO_CHI_MINH_TZ)
 
 
-def salt_for(index: int) -> bytes:
-    return hashlib.sha256(f"fake-user:{index}".encode("utf-8")).digest()[:16]
-
-
-def hash_password(password: str, salt: bytes) -> str:
+def hash_password(password: str) -> str:
     return hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
-        salt,
+        b"",
         PBKDF2_ITERATIONS,
     ).hex()
 
 
-def fake_users(count: int, password: str) -> list[tuple[str, str, str, str, str, datetime]]:
+def fake_users(count: int, password: str) -> list[tuple[str, str, str, str, datetime]]:
     available_domains = domains()
     base_time = local_now().replace(microsecond=0) - timedelta(days=count)
     rows = []
@@ -186,14 +182,12 @@ def fake_users(count: int, password: str) -> list[tuple[str, str, str, str, str,
     for index in range(1, count + 1):
         domain = available_domains[(index - 1) % len(available_domains)]
         email = f"{FAKE_EMAIL_PREFIX}.{index:06d}@{domain}"
-        salt = salt_for(index)
         rows.append(
             (
                 uuid4().hex,
                 f"Fake User {index:04d}",
                 email,
-                hash_password(password, salt),
-                salt.hex(),
+                hash_password(password),
                 base_time + timedelta(minutes=index),
             )
         )
@@ -237,8 +231,8 @@ async def seed_fake_users(
         await conn.executemany(
             """
             INSERT INTO application.users
-                (id, name, email, password_hash, salt, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                (id, name, email, password_hash, created_at)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (email) DO NOTHING
             """,
             rows,

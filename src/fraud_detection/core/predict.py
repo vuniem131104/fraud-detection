@@ -248,6 +248,7 @@ class FraudDetectionService:
         log_time_perf("kserve_inference", operation_started_at)
 
         status = "review" if probability >= self.threshold else "approved"
+        latency = round((perf_counter() - predict_started_at) * 1000, 3)
         logger.info(
             "Finished fraud prediction",
             extra={
@@ -255,6 +256,8 @@ class FraudDetectionService:
                 "transaction_id": current_transaction.get("tx_id"),
                 "probability": probability,
                 "status": status,
+                "latency": latency,
+                "latency_unit": "milliseconds",
             },
         )
         
@@ -265,6 +268,7 @@ class FraudDetectionService:
                     "request_id": request_id,
                     "probability": probability,
                     "status": status,
+                    "latency": latency,
                     **current_transaction,
                 }).encode("utf-8"),
                 key=request_id.encode(),

@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "Daily request counts from PostgreSQL",
+  "description": "Daily transaction request counts, latency percentiles, and review rate from PostgreSQL",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -27,7 +27,7 @@
         "type": "postgres",
         "uid": "PostgreSQL"
       },
-      "description": "Number of API requests per day",
+      "description": "Number of transaction requests per day",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -108,13 +108,138 @@
             "uid": "PostgreSQL"
           },
           "rawQuery": true,
-          "rawSql": "SELECT date_trunc('day', created_at) AS time, COUNT(*) AS requests FROM model_predictions WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1;",
+          "rawSql": "SELECT date_trunc('day', created_at) AS time, COUNT(*) AS requests FROM application.transactions WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1;",
           "format": "time_series",
           "refId": "A"
         }
       ],
-      "title": "Daily Requests",
+      "title": "Daily Transaction Requests",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "PostgreSQL"
+      },
+      "description": "Latency p90, p95, and p99 for transaction requests in the selected dashboard time range",
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 2,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": ["sum"],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "12.3.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "PostgreSQL"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT percentile_cont(0.90) WITHIN GROUP (ORDER BY latency) AS p90, percentile_cont(0.95) WITHIN GROUP (ORDER BY latency) AS p95, percentile_cont(0.99) WITHIN GROUP (ORDER BY latency) AS p99 FROM application.transactions WHERE $__timeFilter(created_at);",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "title": "Transaction Latency Percentiles",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "PostgreSQL"
+      },
+      "description": "Percentage of transaction requests that need manual review in the selected dashboard time range",
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "PostgreSQL"
+          },
+          "rawQuery": true,
+          "rawSql": "SELECT now() AS time, CASE WHEN COUNT(*) = 0 THEN 0 ELSE COUNT(*) FILTER (WHERE status = 'review')::double precision * 100 / COUNT(*) END AS review_rate FROM application.transactions WHERE $__timeFilter(created_at);",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "title": "% Transactions Need Review",
+      "type": "stat"
     }
   ],
   "preload": false,
@@ -124,11 +249,11 @@
     "list": []
   },
   "time": {
-    "from": "now-30d",
+    "from": "now-7d",
     "to": "now"
   },
   "timepicker": {},
   "title": "Accumulated Requests",
   "uid": "accumulated-requests",
-  "version": 1
+  "version": 2
 }

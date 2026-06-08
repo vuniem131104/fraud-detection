@@ -8,7 +8,20 @@ from structlog import get_logger
 from workers.base_worker import BaseKafkaWorker
 from utils import parse_datetime
 
+reversed_mapping_channel = {
+    "W": "web",
+    "C": "mobile_app",
+    "R": "pos",
+}
+
 logger = get_logger(__name__)
+
+
+def latency_from_inputs(inputs: dict[str, Any]) -> float:
+    latency = float(inputs.get("latency") or 0.0)
+    if latency < 0:
+        raise ValueError(f"latency must be greater than or equal to 0, got {latency}")
+    return latency
 
 
 class TransactionWriter(BaseKafkaWorker):
@@ -63,11 +76,12 @@ class TransactionWriter(BaseKafkaWorker):
                         os_raw,
                         browser_raw,
                         screen_resolution,
+                        latency,
                         created_at
                 )
                 VALUES (
                     $1, $2, $3, $4, $5, $6, $7,
-                    $8, $9, $10, $11, $12, $13, $14, $15, $16
+                    $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
                 )
                 """,
                 (
@@ -76,7 +90,7 @@ class TransactionWriter(BaseKafkaWorker):
                     inputs["card_id"],
                     inputs["status"],
                     inputs["amount_usd"],
-                    inputs["channel"],
+                    reversed_mapping_channel.get(inputs["channel"], inputs["channel"]),
                     inputs["billing_zone"],
                     inputs["billing_country"],
                     inputs["email_purchaser"],
@@ -86,6 +100,7 @@ class TransactionWriter(BaseKafkaWorker):
                     inputs["os_raw"],
                     inputs["browser_raw"],
                     inputs["screen_resolution"],
+                    latency_from_inputs(inputs),
                     parse_datetime(inputs["event_timestamp"]),
                 ),
             )
