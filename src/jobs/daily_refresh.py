@@ -4,7 +4,7 @@ from time import perf_counter
 import argparse
 import asyncio
 import json
-
+import os
 
 TRANSACTIONS_KEY_PREFIX = "user:card:transactions:"
 FEATURES_KEY_PREFIX = "user:card:features:"
@@ -26,9 +26,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cutoff-days", type=int, default=30)
     parser.add_argument("--concurrency", type=int, default=25)
     parser.add_argument("--scan-count", type=int, default=100)
-    parser.add_argument("--host", default="localhost")
-    parser.add_argument("--port", type=int, default=6379)
-    parser.add_argument("--db", type=int, default=0)
     return parser.parse_args()
 
 
@@ -185,12 +182,15 @@ async def run_refresh(
 
 async def main() -> None:
     args = parse_args()
-    redis_client = aioredis.Redis(
-        host=args.host,
-        port=args.port,
-        db=args.db,
+    redis_pool = aioredis.BlockingConnectionPool(
+        host=os.getenv("REDIS_HOST"),
+        port=int(os.getenv("REDIS_PORT")),
+        db=int(os.getenv("REDIS_DB")),
         decode_responses=True,
+        max_connections=int(os.getenv("REDIS_POOL_MAX_CONNECTIONS", "64")),
+        timeout=float(os.getenv("REDIS_POOL_TIMEOUT_S", "5")),
     )
+    redis_client = aioredis.Redis(connection_pool=redis_pool)
 
     try:
         await run_refresh(

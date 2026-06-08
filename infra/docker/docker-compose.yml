@@ -47,7 +47,7 @@ services:
       - 9092:9092
       - 29092:29092
     healthcheck:
-      test: ["CMD-SHELL", "rpk cluster info -X brokers=localhost:29092 >/dev/null && curl -fsS --max-time 5 http://localhost:8081/subjects >/dev/null"]
+      test: ["CMD-SHELL", "rpk cluster info -X brokers=127.0.0.1:29092 >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8081/subjects >/dev/null"]
       interval: 10s
       timeout: 6s
       retries: 10
@@ -87,6 +87,27 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  grafana:
+    image: grafana/grafana:12.3.1
+    env_file:
+      - ../../.env
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/accumulated-requests-dashboard.json
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../k8s/helm/grafana/dashboards/accumulated-requests-dashboard.json:/etc/grafana/dashboards/accumulated-requests-dashboard.json:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
   redis:
     image: redis:7.2-alpine
@@ -166,3 +187,4 @@ services:
 volumes:
   pgdata:
   redis-data:
+  grafana-data:

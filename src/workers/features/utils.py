@@ -53,7 +53,7 @@ def decode_redis_value(value: Any) -> Any:
 
 def normalize_email_domains(transaction: dict[str, Any]) -> dict[str, Any]:
     normalized_transaction = transaction.copy()
-    for field in ("request_id", "probability", "status"):
+    for field in ("request_id", "probability", "status", "latency"):
         normalized_transaction.pop(field, None)
 
     for field in ("email_purchaser", "email_recipient"):
