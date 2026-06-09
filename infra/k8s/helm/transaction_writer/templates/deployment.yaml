@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.transactionWriter.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.transactionWriter.name }}
+spec:
+  replicas: {{ .Values.transactionWriter.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Values.transactionWriter.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.transactionWriter.name }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+      - name: {{ .Values.transactionWriter.name }}
+        image: {{ .Values.transactionWriter.image.repository }}:{{ .Values.transactionWriter.image.tag }}
+        imagePullPolicy: {{ .Values.transactionWriter.image.pullPolicy }}
+        envFrom:
+        - configMapRef:
+            name: {{ .Values.transactionWriter.name }}-config
+        - secretRef:
+            name: {{ .Values.transactionWriter.name }}-secrets
+        resources:
+          {{- toYaml .Values.transactionWriter.resources | nindent 10 }}
