@@ -1,0 +1,20 @@
+namespace: core
+
+transactionWriter:
+  name: transaction-writer
+  replicaCount: 1
+  image:
+    repository: us-central1-docker.pkg.dev/project-2a55a756-9eba-4a36-8c6/fraud-detection/transaction-writer
+    tag: "latest"
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "1Gi"
+    limits:
+      cpu: "1500m"
+      memory: "2Gi"
+
+serviceAccount:
+  name: transaction-writer-sa
+  gcpServiceAccount: "transaction-writer-sa@project-2a55a756-9eba-4a36-8c6.iam.gserviceaccount.com"

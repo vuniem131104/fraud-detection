@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.featureRefresher.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.featureRefresher.name }}
+spec:
+  replicas: {{ .Values.featureRefresher.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Values.featureRefresher.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.featureRefresher.name }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+      - name: {{ .Values.featureRefresher.name }}
+        image: {{ .Values.featureRefresher.image.repository }}:{{ .Values.featureRefresher.image.tag }}
+        imagePullPolicy: {{ .Values.featureRefresher.image.pullPolicy }}
+        envFrom:
+        - configMapRef:
+            name: {{ .Values.featureRefresher.name }}-config
+        - secretRef:
+            name: {{ .Values.featureRefresher.name }}-secrets
+        resources:
+          {{- toYaml .Values.featureRefresher.resources | nindent 10 }}
