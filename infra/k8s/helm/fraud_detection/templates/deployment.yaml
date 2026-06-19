@@ -25,8 +25,22 @@ spec:
           name: http
         envFrom:
         - configMapRef:
-            name: {{ .Values.api.name }}-config
+            name: {{ .Values.api.name }}-configmap
         - secretRef:
             name: {{ .Values.api.name }}-secrets
         resources:
           {{- toYaml .Values.api.resources | nindent 10 }}
+      - name: cloud-sql-proxy
+        image: {{ .Values.cloudSqlProxy.image }}
+        args:
+          - "--structured-logs"
+          - "--auto-iam-authn"
+          - "--port={{ .Values.cloudSqlProxy.port }}"
+          - "$(CLOUD_SQL_INSTANCE)"
+        envFrom:
+        - secretRef:
+            name: {{ .Values.api.name }}-secrets
+        - configMapRef:
+            name: {{ .Values.api.name }}-configmap
+        resources:
+          {{- toYaml .Values.cloudSqlProxy.resources | nindent 10 }}

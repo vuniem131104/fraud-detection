@@ -22,8 +22,6 @@ spec:
         imagePullPolicy: {{ .Values.featureRefresher.image.pullPolicy }}
         envFrom:
         - configMapRef:
-            name: {{ .Values.featureRefresher.name }}-config
-        - secretRef:
-            name: {{ .Values.featureRefresher.name }}-secrets
+            name: {{ .Values.featureRefresher.name }}-configmap
         resources:
           {{- toYaml .Values.featureRefresher.resources | nindent 10 }}

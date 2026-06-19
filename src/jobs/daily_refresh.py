@@ -1,10 +1,14 @@
-from redis import asyncio as aioredis
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
 import argparse
 import asyncio
 import json
 import os
+
+from redis import asyncio as aioredis
+from structlog import get_logger
+
+logger = get_logger(__name__)
 
 TRANSACTIONS_KEY_PREFIX = "user:card:transactions:"
 FEATURES_KEY_PREFIX = "user:card:features:"
@@ -173,11 +177,14 @@ async def run_refresh(
     )
     elapsed = perf_counter() - start
 
-    print(f"Keys refreshed: {stats['keys_scanned']}")
-    print(f"Transactions removed: {stats['transactions_removed']}")
-    print(f"Transactions remaining: {stats['transactions_remaining']}")
-    print(f"Concurrency: {concurrency}")
-    print(f"Execution time: {elapsed:.6f} seconds")
+    logger.info(
+        "Daily Redis refresh completed",
+        keys_refreshed=stats["keys_scanned"],
+        transactions_removed=stats["transactions_removed"],
+        transactions_remaining=stats["transactions_remaining"],
+        concurrency=concurrency,
+        execution_time_seconds=elapsed,
+    )
 
 
 async def main() -> None:

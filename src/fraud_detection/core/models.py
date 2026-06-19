@@ -37,4 +37,4 @@ class FraudDetectionInputs(BaseModel):
 class FraudDetectionOutputs(BaseModel):
     tx_id: str
     probability: float
-    status: Literal["review", "approved"]
+    prediction: int

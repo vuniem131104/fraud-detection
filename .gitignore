@@ -21,3 +21,5 @@ data/
 crash.log
 crash.*.log
 models/
+configmap.yaml
+secrets.yaml

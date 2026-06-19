@@ -59,14 +59,14 @@ class FraudDetectionService:
             ),
         )
         self.producer: Optional[AIOKafkaProducer] = None
-        self.predictions_topic = os.getenv("PREDICTIONS_TOPIC", "fraud_predictions")
+        self.predictions_topic = os.getenv("PREDICTIONS_TOPIC")
 
     async def open(self) -> None:
         await self.database.open()
         await self.feature_store.redis_client.ping()
         await self.kserve_client.__aenter__()
         self.producer = AIOKafkaProducer(
-            bootstrap_servers=os.getenv("BOOTSTRAP_SERVERS", "localhost:9092")
+            bootstrap_servers=os.getenv("BOOTSTRAP_SERVERS")
         )
         await self.producer.start()
         logger.info("FraudDetectionService is ready")
@@ -99,7 +99,7 @@ class FraudDetectionService:
             raise ValueError(f"Feature {feature!r} must be numeric, got {value!r}") from exc
         return number if math.isfinite(number) else default
 
-    async def predict_with_kserve(self, model_inputs: Any) -> float:
+    async def predict_with_kserve(self, model_inputs: pd.DataFrame) -> float:
         rows = model_inputs.to_dict(orient="records")
         feature_names = list(model_inputs.columns)
         data = [
@@ -118,14 +118,6 @@ class FraudDetectionService:
         }
 
         try:
-            logger.info(
-                "Sending inference request to KServe",
-                extra={
-                    "kserve_url": self.kserve_url,
-                    "row_count": len(data),
-                    "feature_count": len(feature_names),
-                },
-            )
             response = await self.kserve_client.post(self.kserve_url, json=payload)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -247,29 +239,52 @@ class FraudDetectionService:
         probability = await self.predict_with_kserve(model_inputs)
         log_time_perf("kserve_inference", operation_started_at)
 
-        status = "review" if probability >= self.threshold else "approved"
+        prediction = 1 if probability >= self.threshold else 0
+        tx_id = current_transaction.get("tx_id")
+
+        try:
+            raw_features = model_inputs.to_dict(orient="records")[0]
+            sanitized_features = {
+                k: (None if isinstance(v, float) and not math.isfinite(v) else v)
+                for k, v in raw_features.items()
+            }
+            feature_snapshot = json.dumps(sanitized_features)
+            await self.database.execute(
+                """
+                INSERT INTO application.feature_snapshots (tx_id, features)
+                VALUES ($1, $2)
+                """,
+                (tx_id, feature_snapshot)
+            )
+            logger.info("Saved feature snapshot", extra={"tx_id": tx_id})
+        except Exception:
+            logger.exception("Failed to save feature snapshot", extra={"tx_id": tx_id})
+
         latency = round((perf_counter() - predict_started_at) * 1000, 3)
         logger.info(
             "Finished fraud prediction",
             extra={
                 "request_id": request_id,
-                "transaction_id": current_transaction.get("tx_id"),
+                "transaction_id": tx_id,
                 "probability": probability,
-                "status": status,
+                "prediction": prediction,
                 "latency": latency,
                 "latency_unit": "milliseconds",
             },
         )
-        
+
         try:
             await self.producer.send_and_wait(
                 self.predictions_topic,
                 value=json.dumps({
                     "request_id": request_id,
-                    "probability": probability,
-                    "status": status,
-                    "latency": latency,
-                    **current_transaction,
+                    "fraud_score": probability,
+                    "prediction": prediction,
+                    "latency_ms": latency,
+                    "model_name": os.getenv("MODEL_NAME"),
+                    "model_version": os.getenv("MODEL_VERSION"),
+                    "threshold": self.threshold,
+                    "current_transaction": current_transaction,
                 }).encode("utf-8"),
                 key=request_id.encode(),
             )
@@ -277,7 +292,7 @@ class FraudDetectionService:
                 "Sent prediction result to Kafka",
                 extra={
                     "request_id": request_id,
-                    "transaction_id": current_transaction.get("tx_id"),
+                    "transaction_id": tx_id,
                 },
             )
         except Exception as e:
@@ -285,14 +300,14 @@ class FraudDetectionService:
                 "Failed to send prediction result to Kafka",
                 extra={
                     "request_id": request_id,
-                    "transaction_id": current_transaction.get("tx_id"),
+                    "transaction_id": tx_id,
                     "error": str(e),
                 },
             )
 
         log_time_perf("predict_total", predict_started_at)
         return FraudDetectionOutputs(
-            tx_id=current_transaction.get("tx_id"),
+            tx_id=tx_id,
             probability=probability,
-            status=status,
+            prediction=prediction,
         )
