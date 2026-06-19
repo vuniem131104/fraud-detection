@@ -73,7 +73,7 @@ async def main() -> None:
         db=args.db,
         decode_responses=True,
     )
-
+    
     try:
         data = await get_card_data(redis_client, args.user_id, args.card_id)
     finally:

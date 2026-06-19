@@ -19,9 +19,10 @@ RUN pip install --no-cache-dir \
     "structlog==25.5.0" \
     "uvicorn==0.38.0"
 
-COPY src ./src
+COPY src/database ./src/database
+COPY src/fraud_detection ./src/fraud_detection
 COPY models/feature_schema.json ./models/feature_schema.json
 
 EXPOSE 1311
 
-CMD ["sh", "-c", "exec uvicorn fraud_detection.core.api:app --host 0.0.0.0 --port 1311 --workers \"${API_WORKERS:-5}\" --no-access-log"]
+CMD ["sh", "-c", "exec uvicorn fraud_detection.core.api:app --host 0.0.0.0 --port 1311 --workers \"${FRAUD_DETECTION_API_WORKERS:-5}\" --no-access-log"]

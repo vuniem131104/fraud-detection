@@ -57,7 +57,6 @@ CREATE TABLE application.transactions (
     id TEXT PRIMARY KEY CHECK (id ~ '^[0-9a-f]{32}$'),
     user_id TEXT NOT NULL REFERENCES application.users(id) ON DELETE CASCADE,
     card_id TEXT REFERENCES application.cards(id) ON DELETE SET NULL,
-    status TEXT NOT NULL CHECK (status IN ('approved', 'review')),
     amount_usd NUMERIC(14, 2) NOT NULL CHECK (amount_usd > 0),
     channel TEXT,
     billing_zone INTEGER,
@@ -69,8 +68,33 @@ CREATE TABLE application.transactions (
     os_raw TEXT,
     browser_raw TEXT,
     screen_resolution TEXT,
-    latency DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (latency >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE application.prediction_logs (
+    id BIGSERIAL PRIMARY KEY,
+    tx_id TEXT REFERENCES application.transactions(id),
+    model_name TEXT,
+    model_version TEXT,
+    fraud_score DOUBLE PRECISION,
+    prediction INT,
+    threshold DOUBLE PRECISION,
+    latency_ms DOUBLE PRECISION,
+    created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE application.feature_snapshots (
+    id BIGSERIAL PRIMARY KEY,
+    tx_id TEXT,
+    features JSONB,
+    created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE application.labels (
+    tx_id TEXT PRIMARY KEY REFERENCES application.transactions(id),
+    label INT NOT NULL,
+    label_source TEXT,
+    created_at TIMESTAMP DEFAULT now()
 );
 
 CREATE INDEX cards_user_id_idx
@@ -155,8 +179,8 @@ def domains() -> list[str]:
     return [*EMAIL_BIN.keys(), *sorted(EMAIL_NULLS)]
 
 
-def local_now() -> datetime:
-    return datetime.now(HO_CHI_MINH_TZ)
+def local_now(days_ago: int = 0) -> datetime:
+    return datetime.now(HO_CHI_MINH_TZ) - timedelta(days=days_ago)
 
 
 def to_local_time(value: datetime) -> datetime:
@@ -174,9 +198,9 @@ def hash_password(password: str) -> str:
     ).hex()
 
 
-def fake_users(count: int, password: str) -> list[tuple[str, str, str, str, datetime]]:
+def fake_users(count: int, password: str, days_ago: int = 0) -> list[tuple[str, str, str, str, datetime]]:
     available_domains = domains()
-    base_time = local_now().replace(microsecond=0) - timedelta(days=count)
+    base_time = local_now(days_ago).replace(microsecond=0) - timedelta(days=count)
     rows = []
 
     for index in range(1, count + 1):
@@ -201,9 +225,10 @@ async def seed_fake_users(
     password: str,
     *,
     replace: bool = False,
+    days_ago: int = 0,
 ) -> tuple[int, int]:
     available_domains = domains()
-    rows = fake_users(count, password)
+    rows = fake_users(count, password, days_ago=days_ago)
 
     async with database.transaction() as conn:
         if replace:
@@ -331,9 +356,10 @@ async def seed_cards(
     count: int,
     seed: int,
     replace: bool,
+    days_ago: int = 0,
 ) -> tuple[int, int]:
     rng = random.Random(seed)
-    now = local_now().replace(microsecond=0)
+    now = local_now(days_ago).replace(microsecond=0)
 
     async with database.transaction() as conn:
         users = await conn.fetch(
@@ -414,7 +440,6 @@ async def seed_cards(
 def transaction_row(
     *,
     card: dict,
-    status: str,
     amount_usd: float,
     channel: str,
     billing_zone: int,
@@ -432,7 +457,6 @@ def transaction_row(
         uuid4().hex,
         card["user_id"],
         card["id"],
-        status,
         amount_usd,
         channel,
         billing_zone,
@@ -455,13 +479,13 @@ async def insert_transaction_rows(conn: asyncpg.Connection, rows: list[tuple]) -
         """
         INSERT INTO application.transactions
             (
-                id, user_id, card_id, status, amount_usd, channel,
+                id, user_id, card_id, amount_usd, channel,
                 billing_zone, billing_country, email_purchaser,
                 email_recipient, device_info, device_type, os_raw,
                 browser_raw, screen_resolution, created_at
             )
         VALUES
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         """,
         rows,
     )
@@ -474,12 +498,13 @@ async def seed_transactions(
     anomaly_count: int,
     seed: int,
     replace: bool,
+    days_ago: int = 0,
 ) -> tuple[int, int]:
     if anomaly_count >= transaction_count:
         raise ValueError("--anomaly-count must be lower than --transaction-count")
 
     rng = random.Random(seed)
-    now = local_now().replace(microsecond=0)
+    now = local_now(days_ago).replace(microsecond=0)
     normal_count = transaction_count - anomaly_count
     minimum_history_count = anomaly_count * 3
     if normal_count < minimum_history_count:
@@ -542,7 +567,6 @@ async def seed_transactions(
                 rows.append(
                     transaction_row(
                         card=card,
-                        status="approved",
                         amount_usd=normal_amount_usd(rng),
                         channel=rng.choice(CHANNELS),
                         billing_zone=billing_zone,
@@ -567,7 +591,6 @@ async def seed_transactions(
             rows.append(
                 transaction_row(
                     card=card,
-                    status="approved",
                     amount_usd=normal_amount_usd(rng),
                     channel=rng.choice(CHANNELS),
                     billing_zone=billing_zone,
@@ -595,18 +618,13 @@ async def seed_transactions(
                 """
                 INSERT INTO application.transactions
                     (
-                        id, user_id, card_id, status, amount_usd, channel,
+                        id, user_id, card_id, amount_usd, channel,
                         billing_zone, billing_country, email_purchaser,
                         email_recipient, device_info, device_type, os_raw,
                         browser_raw, screen_resolution, created_at
                 )
                 VALUES
-                    ($1, $2, $3, 'review', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-                RETURNING
-                    id, user_id, card_id, status, amount_usd, channel,
-                    billing_zone, billing_country, email_purchaser,
-                    email_recipient, device_info, device_type, os_raw,
-                    browser_raw, screen_resolution, created_at
+                    ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 """,
                 uuid4().hex,
                 card["user_id"],
@@ -799,6 +817,7 @@ async def run_all(args: argparse.Namespace) -> int:
             args.user_count,
             args.password,
             replace=False,
+            days_ago=args.days_ago,
         )
         print(
             f"Seeded fake users: inserted={inserted}, total_fake_users={total}, "
@@ -810,6 +829,7 @@ async def run_all(args: argparse.Namespace) -> int:
             count=args.card_count,
             seed=args.card_seed,
             replace=False,
+            days_ago=args.days_ago,
         )
         print(f"Seeded cards: users={users}, cards_inserted={cards}")
 
@@ -819,6 +839,7 @@ async def run_all(args: argparse.Namespace) -> int:
             anomaly_count=args.anomaly_count,
             seed=args.transaction_seed,
             replace=False,
+            days_ago=args.days_ago,
         )
         print(
             f"Seeded transactions: approved={normal_transactions}, "
@@ -845,6 +866,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--transaction-count", type=int, default=DEFAULT_TRANSACTION_COUNT)
     parser.add_argument("--transaction-seed", type=int, default=DEFAULT_TRANSACTION_SEED)
     parser.add_argument("--anomaly-count", type=int, default=DEFAULT_ANOMALY_COUNT)
+    parser.add_argument(
+        "--days-ago",
+        type=int,
+        default=0,
+        help="Shift the effective 'now' back by N days so all seeded data pre-dates (now - N days).",
+    )
     parser.add_argument("--schema-only", action="store_true")
     return parser
 

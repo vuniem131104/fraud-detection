@@ -1,0 +1,32 @@
+namespace: core
+
+dailyRefresh:
+  enabled: true
+  name: daily-refresh
+  schedule: "0 0 * * *"
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  successfulJobsHistoryLimit: 3
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  restartPolicy: Never
+  image:
+    repository: us-central1-docker.pkg.dev/project-2a55a756-9eba-4a36-8c6/fraud-detection/daily-refresher
+    tag: "latest"
+    pullPolicy: Always
+  command:
+    - sh
+    - -c
+  args:
+    - exec env PYTHONPATH=src python3 src/jobs/daily_refresh.py --cutoff-days ${CUTOFF_DAYS:-30} --concurrency ${REFRESH_CONCURRENCY:-25} --scan-count ${SCAN_COUNT:-100}
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+serviceAccount:
+  name: daily-refresh-sa
+  gcpServiceAccount: "daily-refresh-sa@project-2a55a756-9eba-4a36-8c6.iam.gserviceaccount.com"

@@ -60,7 +60,7 @@ class RedisFeaturesRefresher(BaseKafkaWorker):
             logger.info("Redis features refresh worker stopped")
 
     async def handle(self, inputs: dict[str, Any]) -> None:
-        transaction_to_store = normalize_email_domains(inputs)
+        transaction_to_store = normalize_email_domains(inputs["current_transaction"])
 
         try:
             user_id = transaction_to_store["user_id"]

@@ -56,13 +56,6 @@ class RedisFeatureStore:
         features_key = build_features_key(user_id, card_id)
 
         try:
-            logger.info(
-                "Starting to fetch transactions and features",
-                extra={
-                    "user_id": user_id,
-                    "card_id": card_id,
-                }
-            )
             async with self.redis_client.pipeline(transaction=False) as pipeline:
                 pipeline.zrevrange(transactions_key, 0, -1)
                 pipeline.hgetall(features_key)

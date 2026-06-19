@@ -22,7 +22,7 @@ spec:
         imagePullPolicy: {{ .Values.transactionWriter.image.pullPolicy }}
         envFrom:
         - configMapRef:
-            name: {{ .Values.transactionWriter.name }}-config
+            name: {{ .Values.transactionWriter.name }}-configmap
         - secretRef:
             name: {{ .Values.transactionWriter.name }}-secrets
         resources:

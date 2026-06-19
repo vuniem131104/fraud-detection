@@ -36,7 +36,7 @@ services:
       - --kafka-addr
       - PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
       - --advertise-kafka-addr
-      - PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - PLAINTEXT://redpanda:29092,OUTSIDE://172.21.0.1:9092
       - --pandaproxy-addr
       - 0.0.0.0:8082
       - --advertise-pandaproxy-addr
@@ -88,26 +88,26 @@ services:
       timeout: 5s
       retries: 5
 
-  grafana:
-    image: grafana/grafana:12.3.1
-    env_file:
-      - ../../.env
-    environment:
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
-      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/accumulated-requests-dashboard.json
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: "5432"
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ../k8s/helm/grafana/dashboards/accumulated-requests-dashboard.json:/etc/grafana/dashboards/accumulated-requests-dashboard.json:ro
-      - grafana-data:/var/lib/grafana
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
+  # grafana:
+  #   image: grafana/grafana:12.3.1
+  #   env_file:
+  #     - ../../.env
+  #   environment:
+  #     GF_AUTH_ANONYMOUS_ENABLED: "true"
+  #     GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+  #     GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/accumulated-requests-dashboard.json
+  #     POSTGRES_HOST: postgres
+  #     POSTGRES_PORT: "5432"
+  #   ports:
+  #     - "3000:3000"
+  #   volumes:
+  #     - ./grafana/provisioning:/etc/grafana/provisioning:ro
+  #     - ../k8s/helm/grafana/dashboards/accumulated-requests-dashboard.json:/etc/grafana/dashboards/accumulated-requests-dashboard.json:ro
+  #     - grafana-data:/var/lib/grafana
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   restart: unless-stopped
 
   redis:
     image: redis:7.2-alpine
@@ -125,35 +125,14 @@ services:
       retries: 5
     restart: unless-stopped
 
-  api:
+  fraud-detection-api:
     build:
       context: ../..
-      dockerfile: infra/docker/Dockerfile.api
+      dockerfile: infra/docker/Dockerfile.fraudDetection
     env_file:
       - ../../.env
-    environment:
-      API_WORKERS: ${API_WORKERS:-5}
-      FEATURE_BUILD_WORKERS: ${FEATURE_BUILD_WORKERS:-1}
-      LOG_LEVEL: ${LOG_LEVEL:-WARNING}
-      TZ: Asia/Ho_Chi_Minh
-      POSTGRES_HOST: postgres
-      POSTGRES_POOL_MAX_SIZE: ${POSTGRES_POOL_MAX_SIZE:-20}
-      REDIS_HOST: redis
-      REDIS_POOL_MAX_CONNECTIONS: ${REDIS_POOL_MAX_CONNECTIONS:-64}
-      BOOTSTRAP_SERVERS: redpanda:29092
-      KSERVE_URL: http://lgbserver:9080/v2/models/fraud-detection/infer
-      KSERVE_MAX_CONNECTIONS: ${KSERVE_MAX_CONNECTIONS:-100}
-      KSERVE_MAX_KEEPALIVE_CONNECTIONS: ${KSERVE_MAX_KEEPALIVE_CONNECTIONS:-100}
     ports:
       - "1311:1311"
-    command:
-      - sh
-      - -c
-      - exec uvicorn fraud_detection.core.api:app --host 0.0.0.0 --port 1311 --workers "$${API_WORKERS:-5}" --no-access-log
-    volumes:
-      - type: bind
-        source: ../../src/fraud_detection
-        target: /app/src/fraud_detection
     depends_on:
       postgres:
         condition: service_healthy
@@ -165,9 +144,37 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  prediction-writer:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.predictionWriter
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    restart: unless-stopped
+    
+  feature-refresher:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.featureRefresher
+    env_file:
+      - ../../.env
+    depends_on:
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    restart: unless-stopped
+
   lgbserver:
     image: kserve/lgbserver:latest
     container_name: lightgbm-lgbserver
+    env_file:
+      - ../../.env
     ports:
       - "8085:9080"
     volumes:
@@ -180,11 +187,11 @@ services:
       - --http_port
       - "9080"
       - --workers
-      - "${KSERVE_WORKERS:-4}"
+      - "${KSERVE_WORKERS:-5}"
       - --nthread
       - "${KSERVE_THREADS_PER_WORKER:-1}"
 
 volumes:
   pgdata:
   redis-data:
-  grafana-data:
+  # grafana-data:
