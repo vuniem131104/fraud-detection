@@ -5,7 +5,9 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
     "asyncpg>=0.31,<1" \
     "aiokafka>=0.14.0" \
-    "structlog==25.5.0"
+    "structlog==25.5.0" \
+    "google-auth==2.53.0" \
+    "requests>=2.32.0"
 
 COPY src/database ./src/database
 COPY src/workers/base_worker.py ./src/workers/base_worker.py

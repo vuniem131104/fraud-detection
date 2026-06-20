@@ -6,14 +6,14 @@ featureRefresher:
   image:
     repository: us-central1-docker.pkg.dev/project-8f21156c-3434-4d17-a8c/fraud-detection/feature-refresher
     tag: "latest"
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   resources:
     requests:
       cpu: "250m"
-      memory: "1Gi"
+      memory: "250Mi"
     limits:
-      cpu: "1500m"
-      memory: "2Gi"
+      cpu: "500m"
+      memory: "500Mi"
 
 serviceAccount:
   name: feature-refresher-sa
