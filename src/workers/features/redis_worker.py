@@ -6,6 +6,7 @@ from typing import Any
 
 from redis import asyncio as aioredis
 from structlog import get_logger
+from uuid import uuid4
 
 from workers.base_worker import BaseKafkaWorker
 from utils import (
@@ -146,7 +147,7 @@ class RedisFeaturesRefresher(BaseKafkaWorker):
 async def main():
     topic = os.getenv("PREDICTIONS_TOPIC")
     bootstrap_servers = os.getenv("BOOTSTRAP_SERVERS")
-    group_id = os.getenv("REDIS_FEATURES_REFRESHER_GROUP_ID")
+    group_id = f"redis-features-refresher-{uuid4()}"
     cutoff_days = int(os.getenv("REDIS_FEATURE_CUTOFF_DAYS"))
     max_records = int(os.getenv("KAFKA_MAX_RECORDS", "100"))
     timeout_ms = int(os.getenv("KAFKA_TIMEOUT_MS", "1000"))
