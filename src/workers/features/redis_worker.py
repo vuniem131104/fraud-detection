@@ -1,3 +1,15 @@
+"""Kafka worker that maintains rolling per-user-card features in Redis.
+
+Defines :class:`RedisFeaturesRefresher`, a :class:`BaseKafkaWorker` subclass
+that consumes transaction messages and updates the online feature store in
+Redis. For each transaction it appends the event to a sorted set of recent
+transactions, evicts entries older than a configurable cutoff window, and
+recomputes derived features (rolling 30-day transaction count, card age, time
+since the last transaction) used at scoring time. The module-level :func:`main`
+builds the Redis connection pool and worker from environment variables and runs
+it.
+"""
+
 import asyncio
 import json
 import os
@@ -25,6 +37,8 @@ logger = get_logger(__name__)
 
 
 class RedisFeaturesRefresher(BaseKafkaWorker):
+    """Kafka worker that refreshes rolling per-user-card features in Redis."""
+
     def __init__(
         self,
         *,
@@ -36,6 +50,21 @@ class RedisFeaturesRefresher(BaseKafkaWorker):
         max_records: int = 100,
         timeout_ms: int = 1000,
     ) -> None:
+        """Initialise the worker with a Redis client and Kafka settings.
+
+        Args:
+            redis_client: Async Redis client used for the feature store.
+            bootstrap_servers: Kafka bootstrap server address(es).
+            topic: Topic to consume transactions from.
+            group_id: Consumer group id.
+            cutoff_days: Size in days of the rolling window of recent
+                transactions to retain; older entries are evicted.
+            max_records: Maximum records fetched per poll.
+            timeout_ms: Poll timeout in milliseconds.
+
+        Raises:
+            ValueError: If ``cutoff_days`` is less than 1.
+        """
         if cutoff_days < 1:
             raise ValueError("cutoff_days must be greater than 0")
 
@@ -50,6 +79,11 @@ class RedisFeaturesRefresher(BaseKafkaWorker):
         self.cutoff_days = cutoff_days
 
     async def start(self) -> None:
+        """Verify the Redis connection, run the worker, then close the client.
+
+        Pings Redis before consuming and always closes the client once the base
+        :meth:`start` returns.
+        """
         logger.info("Pinging Redis")
         await self.redis_client.ping()
 
@@ -61,6 +95,23 @@ class RedisFeaturesRefresher(BaseKafkaWorker):
             logger.info("Redis features refresh worker stopped")
 
     async def handle(self, inputs: dict[str, Any]) -> None:
+        """Update the Redis feature store from one transaction message.
+
+        Normalises the transaction (email domains, numeric ``D4``/``D15``
+        fields, localised event timestamp), then runs the
+        :data:`REFRESH_KEY_SCRIPT` Lua script to atomically add the transaction
+        to the per-card sorted set, evict entries older than the cutoff window,
+        and read back the removed/remaining counts and the stored card creation
+        time. Finally it recomputes and writes the derived feature hash
+        (rolling 30-day transaction count, card age in days, last transaction
+        time, and days since the last transaction).
+
+        Args:
+            inputs: Decoded message containing ``current_transaction``.
+
+        Raises:
+            Exception: Re-raised after logging on any failure.
+        """
         transaction_to_store = normalize_email_domains(inputs["current_transaction"])
 
         try:
@@ -145,6 +196,12 @@ class RedisFeaturesRefresher(BaseKafkaWorker):
 
 
 async def main():
+    """Build the Redis features-refresh worker from env vars and run it.
+
+    Reads Kafka and Redis configuration from environment variables, builds a
+    blocking Redis connection pool, constructs the
+    :class:`RedisFeaturesRefresher` and runs it until shutdown.
+    """
     topic = os.getenv("PREDICTIONS_TOPIC")
     bootstrap_servers = os.getenv("BOOTSTRAP_SERVERS")
     group_id = f"redis-features-refresher-{uuid4()}"

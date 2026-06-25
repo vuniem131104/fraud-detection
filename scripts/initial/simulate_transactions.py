@@ -111,6 +111,7 @@ CHANNELS = ("W", "C", "R")  # web, mobile_app, pos
 # ---------------------------------------------------------------------------
 
 def _country_zone(country: int) -> int:
+    """Return the geographic zone for a numeric country code, defaulting to zone 1."""
     for code, zone in COUNTRIES:
         if code == country:
             return zone
@@ -165,15 +166,21 @@ async def load_pool_from_postgres(database: PostgresDatabase) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _normal_amount(rng: random.Random) -> float:
+    """Draw a realistic "normal" transaction amount in USD, clamped to ``[3, 350]``."""
     amount = rng.lognormvariate(3.35, 0.65)
     return round(min(max(amount, 3.0), 350.0), 2)
 
 
 def _anomaly_amount(rng: random.Random) -> float:
+    """Draw a high "anomalous" transaction amount in USD (``[1800, 9500]``)."""
     return round(rng.uniform(1_800.0, 9_500.0), 2)
 
 
 def _card_age_days(card: dict, event_ts: datetime) -> float:
+    """Return the card's age in days at ``event_ts`` (clamped at 0, rounded to 4 dp).
+
+    Naive card creation timestamps are assumed to be in Ho Chi Minh local time.
+    """
     card_created = card["card_created_at"]
     if card_created.tzinfo is None:
         card_created = card_created.replace(tzinfo=HO_CHI_MINH_TZ)
@@ -181,6 +188,7 @@ def _card_age_days(card: dict, event_ts: datetime) -> float:
 
 
 def _email_domain(email: str) -> str:
+    """Return the lowercase domain part of an email address (or the whole value if no ``@``)."""
     return email.split("@", 1)[1].lower() if "@" in email else email.lower()
 
 
@@ -191,6 +199,22 @@ def build_normal_payload(
     prev_tx_at: datetime,
     rng: random.Random,
 ) -> dict[str, Any]:
+    """Build a benign transaction request payload for a given card and timestamp.
+
+    Picks a normal device profile and billing location (mostly the card's own
+    country, occasionally a same-zone country), derives card age and recency
+    features from the running per-card state, and emits low-risk C/D/M values.
+
+    Args:
+        card: Pooled user/card record.
+        event_ts: Timezone-aware timestamp for this transaction.
+        prev_tx_count: Count of the card's prior transactions (feeds ``C13``).
+        prev_tx_at: Timestamp of the card's previous transaction (feeds ``D15``).
+        rng: Random number generator for reproducible variation.
+
+    Returns:
+        The scoring-API request payload as a dict.
+    """
     device_type, os_raw, browser_raw, screen = DEVICE_PROFILES[
         rng.randint(0, len(DEVICE_PROFILES) - 1)
     ]
@@ -312,12 +336,29 @@ async def send_batch(
     *,
     dry_run: bool = False,
 ) -> list[dict]:
+    """POST a batch of payloads concurrently to the scoring API.
+
+    In ``dry_run`` mode the payloads are pretty-printed and no HTTP requests are
+    made. Otherwise each payload is posted in parallel and the per-transaction
+    result (or error) is collected.
+
+    Args:
+        client: Shared async HTTP client.
+        payloads: Transaction request payloads to send.
+        api_url: Scoring endpoint URL.
+        dry_run: If true, print payloads instead of sending them.
+
+    Returns:
+        A list of per-transaction result dicts (each carrying ``tx_id`` plus either
+        scoring fields, a ``dry_run`` flag, or an ``error`` message).
+    """
     if dry_run:
         for p in payloads:
             print(json.dumps(p, indent=2))
         return [{"tx_id": p["tx_id"], "dry_run": True} for p in payloads]
 
     async def _post(payload: dict) -> dict:
+        """Post a single payload and return its result dict, capturing any error."""
         try:
             resp = await client.post(api_url, json=payload, timeout=30.0)
             resp.raise_for_status()
@@ -407,6 +448,21 @@ def _build_day_payloads(
 # ---------------------------------------------------------------------------
 
 async def simulate(args: argparse.Namespace) -> int:
+    """Run the multi-day transaction simulation against the scoring API.
+
+    Loads the real user/card pool from Postgres, then for each day in the
+    configured range builds the day's payloads and sends them in concurrent
+    batches, printing per-day and overall progress (counts of sent, errored and
+    fraud-flagged transactions). In ``--dry-run`` mode it stops after the first
+    batch.
+
+    Args:
+        args: Parsed CLI arguments controlling URL, volumes, anomaly range,
+            day range, batch size, seed and dry-run mode.
+
+    Returns:
+        Process exit code (0 on success, 1 if no users/cards are found).
+    """
     rng = random.Random(args.seed)
 
     # ------------------------------------------------------------------
@@ -530,6 +586,7 @@ async def simulate(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the transaction-simulation CLI."""
     parser = argparse.ArgumentParser(
         description=(
             "Simulate historical transaction API calls using real users/cards from Postgres.\n"
@@ -576,6 +633,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """CLI entry point: validate day/anomaly ranges and run the simulation.
+
+    Returns:
+        Process exit code (0 on success, 1 on invalid argument ranges).
+    """
     args = build_parser().parse_args()
     if args.days_from < args.days_to:
         print(

@@ -1,3 +1,13 @@
+"""Kafka worker that persists predictions and transactions to Postgres.
+
+Defines :class:`PredictionWriter`, a :class:`BaseKafkaWorker` subclass that
+consumes scored-transaction messages from the predictions topic and writes them
+to two Postgres tables: ``application.transactions`` (the transaction details)
+and ``application.prediction_logs`` (the model's fraud score and verdict).
+The module-level :func:`main` builds the database connection and worker from
+environment variables and runs it.
+"""
+
 import asyncio
 import os
 from typing import Any
@@ -19,6 +29,8 @@ CHANNEL_MAP = {
 
 
 class PredictionWriter(BaseKafkaWorker):
+    """Kafka worker that writes transactions and prediction logs to Postgres."""
+
     def __init__(
         self,
         *,
@@ -29,6 +41,16 @@ class PredictionWriter(BaseKafkaWorker):
         max_records: int = 100,
         timeout_ms: int = 1000,
     ) -> None:
+        """Initialise the worker with a Postgres database and Kafka settings.
+
+        Args:
+            database: Postgres database wrapper used to execute inserts.
+            bootstrap_servers: Kafka bootstrap server address(es).
+            topic: Topic to consume scored transactions from.
+            group_id: Consumer group id.
+            max_records: Maximum records fetched per poll.
+            timeout_ms: Poll timeout in milliseconds.
+        """
         super().__init__(
             bootstrap_servers=bootstrap_servers,
             topic=topic,
@@ -39,6 +61,11 @@ class PredictionWriter(BaseKafkaWorker):
         self.database = database
 
     async def start(self) -> None:
+        """Open the Postgres connection pool, run the worker, then close it.
+
+        Wraps the base :meth:`start` so the database pool is opened before
+        consuming and always closed afterwards.
+        """
         logger.info("Opening Postgres connection pool")
         await self.database.open()
         try:
@@ -48,6 +75,22 @@ class PredictionWriter(BaseKafkaWorker):
             await self.database.close()
 
     async def handle(self, msg: dict[str, Any]) -> None:
+        """Persist one scored transaction message to Postgres.
+
+        Inserts the transaction into ``application.transactions`` (mapping the
+        raw channel code via :data:`CHANNEL_MAP` and parsing the event
+        timestamp) and the model output into ``application.prediction_logs``.
+        The transaction insert uses ``ON CONFLICT (id) DO NOTHING`` to stay
+        idempotent.
+
+        Args:
+            msg: Decoded message containing ``current_transaction`` plus the
+                model name/version, fraud score, prediction, threshold and
+                latency.
+
+        Raises:
+            Exception: Re-raised after logging if either insert fails.
+        """
         tx = msg.get("current_transaction", {})
         tx_id = tx.get("tx_id") or tx.get("tx_id")
 
@@ -123,6 +166,12 @@ class PredictionWriter(BaseKafkaWorker):
 
 
 async def main() -> None:
+    """Build the Postgres prediction-writer worker from env vars and run it.
+
+    Reads Kafka and database configuration from environment variables, creates a
+    unique consumer group id, constructs the :class:`PredictionWriter` and runs
+    it until shutdown.
+    """
     topic = os.getenv("PREDICTIONS_TOPIC")
     bootstrap_servers = os.getenv("BOOTSTRAP_SERVERS")
     group_id = f"postgres-prediction-writer-{uuid4()}"

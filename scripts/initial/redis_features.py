@@ -1,3 +1,19 @@
+"""Load recent per-card transaction history and features from Postgres into Redis.
+
+This script reads the last N days (default 30) of transactions from the Postgres
+``application`` schema, groups them by ``(user_id, card_id)``, and writes them to
+Redis so the fraud-detection service can read them at scoring time:
+
+* each transaction is serialized into a model-feature payload and stored in a
+  per-card sorted set (``user:card:transactions:<user_id>_<card_id>``) scored by
+  event timestamp, and
+* an aggregate feature hash (transaction count, card age, recency, etc.) is
+  stored per card under ``user:card:features:<user_id>_<card_id>``.
+
+By default existing matching keys are replaced; ``--append`` keeps them. Redis
+connection details and the look-back window are configurable via CLI arguments.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -26,28 +42,48 @@ HO_CHI_MINH_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
 
 
 def redis_transactions_key(user_id: str, card_id: str) -> str:
+    """Return the Redis sorted-set key holding a card's transaction history."""
     return f"user:card:transactions:{user_id}_{card_id}"
 
 
 def redis_features_key(user_id: str, card_id: str) -> str:
+    """Return the Redis hash key holding a card's aggregate features."""
     return f"user:card:features:{user_id}_{card_id}"
 
 
 def local_now() -> datetime:
+    """Return the current time in the Ho Chi Minh timezone."""
     return datetime.now(HO_CHI_MINH_TZ)
 
 
 def to_local_time(value: datetime) -> datetime:
+    """Convert a datetime to the Ho Chi Minh timezone.
+
+    Naive datetimes are assumed to already be in Ho Chi Minh local time and are
+    simply tagged with that timezone; aware datetimes are converted.
+    """
     if value.tzinfo is None:
         return value.replace(tzinfo=HO_CHI_MINH_TZ)
     return value.astimezone(HO_CHI_MINH_TZ)
 
 
 def iso_local(value: datetime) -> str:
+    """Return the ISO-8601 string of ``value`` rendered in Ho Chi Minh local time."""
     return to_local_time(value).isoformat()
 
 
 def json_default(value: Any) -> Any:
+    """JSON serializer hook for datetimes and Decimals.
+
+    Args:
+        value: The object ``json`` could not serialize natively.
+
+    Returns:
+        An ISO-8601 local string for datetimes, or a float for Decimals.
+
+    Raises:
+        TypeError: If ``value`` is of any other unsupported type.
+    """
     if isinstance(value, datetime):
         return iso_local(value)
     if isinstance(value, Decimal):
@@ -63,11 +99,13 @@ mapping_channel = {
 
 
 def days_between(start: datetime, end: datetime) -> float:
+    """Return the number of days from ``start`` to ``end`` (clamped at 0, rounded to 4 dp)."""
     elapsed_days = (to_local_time(end) - to_local_time(start)).total_seconds() / SECONDS_PER_DAY
     return round(max(elapsed_days, 0.0), 4)
 
 
 def issuer_numeric(issuer_code: str) -> int:
+    """Extract the digits from an issuer code and return them as an int (0 if none)."""
     digits = "".join(character for character in issuer_code if character.isdigit())
     return int(digits or 0)
 
@@ -78,6 +116,22 @@ def transaction_payload(
     previous_transaction_count: int,
     previous_created_at: datetime,
 ) -> dict[str, Any]:
+    """Build the model-feature payload for a single stored transaction.
+
+    Flattens a joined transaction/card row into the feature schema expected by the
+    scoring service, normalizing email domains, deriving card age (``D4``) and
+    recency (``D15``) relative to the previous transaction, and setting the
+    transaction sequence count (``C13``).
+
+    Args:
+        row: Joined transaction/card row mapping.
+        previous_transaction_count: Number of the card's earlier transactions.
+        previous_created_at: Timestamp of the card's previous transaction (or the
+            card creation time for the first one).
+
+    Returns:
+        The feature payload dict for the transaction.
+    """
     created_at = to_local_time(row["created_at"])
     card_created_at = to_local_time(row["card_created_at"])
     return {
@@ -118,6 +172,23 @@ async def get_data_from_postgres(
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     now: datetime | None = None,
 ) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """Fetch recent transactions joined with card data, grouped by user/card.
+
+    Reads all transactions created within ``lookback_days`` of ``now`` (joined to
+    their card) and groups them by ``(user_id, card_id)``, newest first within
+    each group.
+
+    Args:
+        database: Open Postgres database wrapper.
+        lookback_days: Size of the look-back window in days.
+        now: Reference "now"; defaults to the current local time.
+
+    Returns:
+        A mapping of ``(user_id, card_id)`` to its list of transaction row dicts.
+
+    Raises:
+        ValueError: If ``lookback_days`` is less than 1.
+    """
     if lookback_days < 1:
         raise ValueError("lookback_days must be greater than 0")
 
@@ -172,6 +243,17 @@ def feature_payload(
     *,
     now: datetime,
 ) -> dict[str, Any]:
+    """Build the aggregate feature hash for one card's recent transactions.
+
+    Args:
+        rows: A card's transaction rows, ordered newest-first (``rows[0]`` is the
+            most recent transaction).
+        now: Reference "now" used to compute card age and recency.
+
+    Returns:
+        A dict with the transaction count, card age in days, days since the last
+        transaction, and the card-created/last-transaction timestamps.
+    """
     newest = rows[0]
     now = to_local_time(now)
     card_created_at = to_local_time(newest["card_created_at"])
@@ -194,6 +276,28 @@ async def store_grouped_transactions(
     now: datetime | None = None,
     clear_existing: bool = True,
 ) -> int:
+    """Write grouped transactions and aggregate features into Redis.
+
+    For each ``(user_id, card_id)`` group, optionally clears existing keys, then
+    pipelines each transaction into the per-card sorted set (scored by event
+    timestamp) and writes the aggregate feature hash. Per-transaction recency is
+    computed from the chronological ordering within the group.
+
+    Args:
+        grouped_transactions: Mapping of ``(user_id, card_id)`` to transaction rows.
+        host: Redis host.
+        port: Redis port.
+        db: Redis database number.
+        now: Reference "now" used for feature computation; defaults to local now.
+        clear_existing: If true, delete matching keys before writing (replace mode);
+            otherwise append to existing keys.
+
+    Returns:
+        The total number of transactions stored across all groups.
+
+    Raises:
+        RuntimeError: If the ``redis`` Python package is not installed.
+    """
     try:
         from redis import asyncio as aioredis
     except ModuleNotFoundError as exc:
@@ -256,6 +360,7 @@ async def store_grouped_transactions(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the Redis feature-loading CLI."""
     parser = argparse.ArgumentParser(
         description="Load last-30-day card transaction features from Postgres into Redis."
     )
@@ -272,6 +377,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def main() -> None:
+    """CLI entry point: load recent transactions from Postgres into Redis.
+
+    Parses arguments, fetches the grouped transactions for the configured
+    look-back window, writes them and their features to Redis, and prints a
+    summary of how much was loaded.
+    """
     args = build_parser().parse_args()
     now = local_now()
     database = PostgresDatabase.from_env()

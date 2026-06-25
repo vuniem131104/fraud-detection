@@ -1,3 +1,5 @@
+"""CLI utility to inspect the Redis-cached transactions and features for a user/card pair."""
+
 from redis import asyncio as aioredis
 import argparse
 import asyncio
@@ -10,6 +12,7 @@ key_features = "user:card:features:{user_id}_{card_id}"
 
 
 def decode_redis_value(value: Any) -> Any:
+    """Decode a raw Redis value from bytes to str, passing through non-bytes values."""
     if isinstance(value, bytes):
         return value.decode()
 
@@ -17,6 +20,7 @@ def decode_redis_value(value: Any) -> Any:
 
 
 def decode_features(values: dict[Any, Any]) -> dict[str, Any]:
+    """Decode a Redis feature hash, coercing known feature keys to their numeric types."""
     feature_types = {
         "no_transactions_30_days": int,
         "card_age_days": float,
@@ -34,6 +38,7 @@ def decode_features(values: dict[Any, Any]) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the user/card lookup, including Redis connection options."""
     parser = argparse.ArgumentParser(description="Get transactions and features for a user card.")
     parser.add_argument("user_id")
     parser.add_argument("card_id")
@@ -48,6 +53,7 @@ async def get_card_data(
     user_id: str,
     card_id: str,
 ) -> dict:
+    """Fetch and decode the cached transactions and features for a user/card pair from Redis."""
     transactions_key = key_transactions.format(user_id=user_id, card_id=card_id)
     features_key = key_features.format(user_id=user_id, card_id=card_id)
 
@@ -66,6 +72,7 @@ async def get_card_data(
 
 
 async def main() -> None:
+    """Connect to Redis, retrieve the card data for the given user/card, and print it as JSON."""
     args = parse_args()
     redis_client = aioredis.Redis(
         host=args.host,

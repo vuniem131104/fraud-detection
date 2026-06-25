@@ -1,3 +1,11 @@
+"""Smoke-test script that scores an anomalous transaction for a given user/card pair.
+
+It builds a deliberately anomalous current transaction (with or without prior
+transaction history) and runs it through ``FraudDetectionService`` against live
+Postgres and Redis backends, asserting the prediction probability and status are
+consistent with the chosen mode.
+"""
+
 import argparse
 import asyncio
 import json
@@ -27,6 +35,8 @@ Mode = Literal["with-transactions", "without-transactions"]
 
 @dataclass(frozen=True)
 class PredictionCase:
+    """A resolved scoring scenario: the mode, user/card identifiers, and cached Redis state."""
+
     mode: Mode
     user_id: str
     card_id: str
@@ -34,11 +44,13 @@ class PredictionCase:
 
     @property
     def previous_transaction_count(self) -> int:
+        """Return the number of prior transactions recorded in the cached Redis state."""
         transactions = self.redis_state.get("transactions", [])
         return len(transactions) if isinstance(transactions, list) else 0
 
 
 def load_dotenv() -> None:
+    """Load key/value pairs from the project ``.env`` file into the environment if present."""
     env_path = PROJECT_ROOT / ".env"
     if not env_path.exists():
         return
@@ -52,6 +64,7 @@ def load_dotenv() -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Load the .env file and parse CLI arguments for the prediction smoke check."""
     load_dotenv()
     parser = argparse.ArgumentParser(
         description="Run fraud prediction smoke checks with or without prior transactions."
@@ -87,6 +100,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_schema(model_dir: str) -> dict[str, Any]:
+    """Load ``feature_schema.json`` from the model directory, raising if it is missing."""
     schema_path = Path(model_dir) / "feature_schema.json"
     if schema_path.exists():
         return json.loads(schema_path.read_text())
@@ -95,6 +109,7 @@ def load_schema(model_dir: str) -> dict[str, Any]:
 
 
 def issuer_numeric(issuer_code: str) -> int:
+    """Extract the digits from an issuer code and return them as an integer (0 if none)."""
     digits = "".join(character for character in issuer_code if character.isdigit())
     return int(digits or 0)
 
@@ -104,6 +119,7 @@ async def transaction_count(
     user_id: str,
     card_id: str,
 ) -> int | None:
+    """Return the transaction count for a user/card from Postgres, or None if the card is absent."""
     async with database.connection() as conn:
         row = await conn.fetchrow(
             """
@@ -127,6 +143,7 @@ async def transaction_count(
 
 
 def redis_state_matches_mode(redis_state: dict[str, Any], mode: Mode) -> bool:
+    """Check whether the cached Redis transaction history matches the expected mode."""
     transactions = redis_state.get("transactions", [])
     transaction_count = len(transactions) if isinstance(transactions, list) else 0
     if mode == "with-transactions":
@@ -141,6 +158,7 @@ async def resolve_prediction_case(
     card_id: str,
     mode: Mode,
 ) -> PredictionCase:
+    """Validate Postgres and Redis history against the mode and build the matching PredictionCase."""
     count = await transaction_count(database, user_id, card_id)
     if count is None:
         raise ValueError(f"No card found for user_id={user_id}, card_id={card_id}")
@@ -160,6 +178,7 @@ async def load_card_profile(
     user_id: str,
     card_id: str,
 ) -> dict[str, Any]:
+    """Load the card profile (issuer, brand, type, latest purchaser email, etc.) from Postgres."""
     async with database.connection() as conn:
         row = await conn.fetchrow(
             """
@@ -199,6 +218,7 @@ def build_anomalous_current_transaction(
     card_profile: dict[str, Any],
     event_timestamp: str | None = None,
 ) -> dict[str, Any]:
+    """Build a deliberately anomalous current-transaction payload that mismatches the card profile."""
     if prediction_case.mode == "with-transactions" and prediction_case.previous_transaction_count == 0:
         raise ValueError(
             f"No Redis transaction history found for user_id={prediction_case.user_id}, "
@@ -249,6 +269,7 @@ def validate_prediction(
     status: str,
     min_history_review_probability: float,
 ) -> None:
+    """Assert the probability is in [0, 1] and, for with-transactions mode, the status is "review"."""
     if not 0 <= probability <= 1:
         raise AssertionError(f"Expected probability in [0, 1], got {probability:.6f}")
     if mode == "with-transactions":
@@ -273,6 +294,7 @@ async def run_prediction_case(
     feature_store: RedisFeatureStore,
     min_history_review_probability: float,
 ) -> dict[str, Any]:
+    """Resolve the case, score the anomalous transaction, validate it, and return a result summary."""
     prediction_case = await resolve_prediction_case(
         database,
         feature_store,
@@ -308,6 +330,7 @@ async def run_prediction_case(
 
 
 async def main_async(args: argparse.Namespace) -> int:
+    """Wire up Redis/Postgres/service, run the prediction case for the chosen mode, and print the result."""
     mode: Mode = "with-transactions" if args.with_transactions else "without-transactions"
     redis_client = aioredis.Redis(
         host=os.getenv("REDIS_HOST"),
@@ -358,6 +381,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    """Parse arguments and run the async smoke check via ``asyncio.run``."""
     return asyncio.run(main_async(parse_args()))
 
 
