@@ -133,6 +133,8 @@ services:
       - ../../.env
     ports:
       - "1311:1311"
+    volumes:
+      - ../../certs:/app/certs:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -140,8 +142,8 @@ services:
         condition: service_healthy
       lgbserver:
         condition: service_started
-      redpanda:
-        condition: service_healthy
+      # redpanda:
+        # condition: service_healthy
     restart: unless-stopped
 
   prediction-writer:
@@ -150,19 +152,23 @@ services:
       dockerfile: infra/docker/Dockerfile.predictionWriter
     env_file:
       - ../../.env
+    volumes:
+      - ../../certs:/app/certs:ro
     depends_on:
       postgres:
         condition: service_healthy
       redpanda:
         condition: service_healthy
     restart: unless-stopped
-    
+
   feature-refresher:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile.featureRefresher
     env_file:
       - ../../.env
+    volumes:
+      - ../../certs:/app/certs:ro
     depends_on:
       redis:
         condition: service_healthy

@@ -3,10 +3,12 @@ namespace: core
 api:
   name: fraud-detection-api
   replicaCount: 1
+  strategy:
+    type: Recreate
   image:
-    repository: us-central1-docker.pkg.dev/project-8f21156c-3434-4d17-a8c/fraud-detection/fraud-detection
+    repository: us-central1-docker.pkg.dev/project-8f21156c-3434-4d17-a8c/fraud-detection/fraud-detection-api
     tag: "latest"
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   port: 1311
   resources:
     requests:
@@ -17,15 +19,15 @@ api:
       memory: "2Gi"
 
 cloudSqlProxy:
-  image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:1.45.1
+  image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.22.1
   port: 5432
   resources:
     requests:
-      cpu: "50m"
-      memory: "128Mi"
+      cpu: "250m"
+      memory: "256Mi"
     limits:
       cpu: "500m"
-      memory: "512Mi"
+      memory: "1Gi"
 
 serviceAccount:
   name: fraud-detection-api-sa

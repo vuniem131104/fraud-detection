@@ -8,6 +8,7 @@ from time import perf_counter
 from typing import Any, Optional
 
 import asyncio
+import ssl
 import httpx
 import pandas as pd
 from structlog import get_logger
@@ -65,8 +66,17 @@ class FraudDetectionService:
         await self.database.open()
         await self.feature_store.redis_client.ping()
         await self.kserve_client.__aenter__()
+        ssl_context = ssl.create_default_context(
+            cafile=os.getenv("KAFKA_SSL_CAFILE"),
+        )
+        ssl_context.load_cert_chain(
+            certfile=os.getenv("KAFKA_SSL_CERTFILE"),
+            keyfile=os.getenv("KAFKA_SSL_KEYFILE"),
+        )
         self.producer = AIOKafkaProducer(
-            bootstrap_servers=os.getenv("BOOTSTRAP_SERVERS")
+            bootstrap_servers=os.getenv("BOOTSTRAP_SERVERS"),
+            security_protocol=os.getenv("KAFKA_SECURITY_PROTOCOL", "SSL"),
+            ssl_context=ssl_context,
         )
         await self.producer.start()
         logger.info("FraudDetectionService is ready")

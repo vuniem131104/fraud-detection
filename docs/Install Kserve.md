@@ -17,20 +17,52 @@ kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/
 
 # Install Kserve
 kubectl create namespace kserve
-helm install kserve-crd oci://ghcr.io/kserve/charts/kserve-crd --version v0.18.0
-helm install kserve oci://ghcr.io/kserve/charts/kserve-resources --version v0.18.0
+helm install kserve-crd oci://ghcr.io/kserve/charts/kserve-crd --version v0.18.0 -n kserve
+helm install kserve oci://ghcr.io/kserve/charts/kserve-resources --version v0.18.0 -n kserve
 
 # Install serving runtime depend on model type
-kubectl apply -f https://raw.githubusercontent.com/kserve/kserve/master/config/runtimes/kserve-mlserver.yaml
-
-# Problems 
-  - Insufficient cpus, memory when installing kserve, knative, istio
-  - Not have ClusterServingRuntime kserve-mlserver, we need to replace placeholder in mlserver:replace → seldonio/mlserver:1.5.0
-  - Pods use default service account to work with operations on GCP -> make sure to Turn on Workload Identity GKE by running:
-  ```
-  gcloud container clusters update fraud-detection \
-  --zone us-central1-a \
-  --workload-pool=$(gcloud config get-value project).svc.id.goog
-  # check result: gcloud container clusters describe fraud-detection --zone us-central1-a --format="value(workloadIdentityConfig.workloadPool)"
-  ```
-  
+For lightgbm, please run the following command to install lightgbm serving runtime:
+```bash
+kubectl apply -f - <<EOF
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-lgbserver
+  annotations:
+    serving.kserve.io/server-type: lgbserver
+spec:
+  annotations:
+    prometheus.kserve.io/port: '8080'
+    prometheus.kserve.io/path: "/metrics"
+  supportedModelFormats:
+    - name: lightgbm
+      version: "4"
+      autoSelect: true
+      priority: 1
+  protocolVersions:
+    - v1
+    - v2
+  containers:
+    - name: kserve-container
+      image: kserve/lgbserver:v0.18.0
+      args:
+        - --model_name={{.Name}}
+        - --model_dir=/mnt/models
+        - --http_port=8080
+        - --nthread=1
+      securityContext:
+        allowPrivilegeEscalation: false
+        privileged: false
+        runAsNonRoot: true
+        capabilities:
+          drop:
+            - ALL
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+        limits:
+          cpu: "1"
+          memory: 2Gi
+EOF
+```

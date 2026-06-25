@@ -7,6 +7,7 @@ from structlog import get_logger
 
 from workers.base_worker import BaseKafkaWorker
 from utils import parse_datetime
+from uuid import uuid4
 
 logger = get_logger(__name__)
 
@@ -124,7 +125,7 @@ class PredictionWriter(BaseKafkaWorker):
 async def main() -> None:
     topic = os.getenv("PREDICTIONS_TOPIC")
     bootstrap_servers = os.getenv("BOOTSTRAP_SERVERS")
-    group_id = os.getenv("TRANSACTION_WRITER_GROUP_ID")
+    group_id = f"postgres-prediction-writer-{uuid4()}"
     max_records = int(os.getenv("KAFKA_MAX_RECORDS", "100"))
     timeout_ms = int(os.getenv("KAFKA_TIMEOUT_MS", "1000"))
 

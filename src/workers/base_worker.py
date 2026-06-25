@@ -1,5 +1,5 @@
 import asyncio
-import threading
+import os
 from structlog import get_logger
 import signal
 import json
@@ -7,34 +7,7 @@ import ssl
 from aiokafka import AIOKafkaConsumer, ConsumerRecord
 from typing import Any
 
-import google.auth
-import google.auth.transport.requests
-from aiokafka.abc import AbstractTokenProvider
-
 logger = get_logger(__name__)
-
-
-class _GCPOAuthTokenProvider(AbstractTokenProvider):
-    """Fetches short-lived GCP access tokens for Managed Kafka SASL_OAUTHBEARER."""
-
-    def __init__(self) -> None:
-        self._credentials, _ = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
-        )
-        self._http = google.auth.transport.requests.Request()
-        # google-auth's refresh() is not safe to call concurrently on the
-        # same Credentials object from multiple threads.
-        self._lock = threading.Lock()
-
-    def _refresh(self) -> str:
-        with self._lock:
-            if not self._credentials.valid:
-                self._credentials.refresh(self._http)
-            return self._credentials.token
-
-    async def token(self) -> str:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._refresh)
 
 
 class BaseKafkaWorker:
@@ -55,7 +28,13 @@ class BaseKafkaWorker:
 
         self._stopping = asyncio.Event()
 
-        ssl_context = ssl.create_default_context()
+        ssl_context = ssl.create_default_context(
+            cafile=os.getenv("KAFKA_SSL_CAFILE"),
+        )
+        ssl_context.load_cert_chain(
+            certfile=os.getenv("KAFKA_SSL_CERTFILE"),
+            keyfile=os.getenv("KAFKA_SSL_KEYFILE"),
+        )
         self.consumer = AIOKafkaConsumer(
             self.topic,
             bootstrap_servers=self.bootstrap_servers,
@@ -63,9 +42,7 @@ class BaseKafkaWorker:
             enable_auto_commit=False,
             auto_offset_reset="earliest",
             max_poll_records=self.max_records,
-            security_protocol="SASL_SSL",
-            sasl_mechanism="OAUTHBEARER",
-            sasl_oauth_token_provider=_GCPOAuthTokenProvider(),
+            security_protocol=os.getenv("KAFKA_SECURITY_PROTOCOL", "SSL"),
             ssl_context=ssl_context,
         )
 
