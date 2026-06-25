@@ -18,3 +18,9 @@ service.cert
 service.key
 
 manifests/
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
