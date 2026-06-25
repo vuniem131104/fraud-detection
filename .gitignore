@@ -12,14 +12,9 @@ dataset
 .env
 data/
 
-# Terraform
-**/.terraform/
-*.tfstate
-*.tfstate.*
-*.tfvars
-!*.tfvars.example
-crash.log
-crash.*.log
-models/
-configmap.yaml
-secrets.yaml
+certs/
+*.pem
+service.cert
+service.key
+
+manifests/

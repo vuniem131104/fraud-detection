@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: kafka-config
-data:
-  BOOTSTRAP_SERVERS: "bootstrap.fraud-detection.us-central1.managedkafka.project-8f21156c-3434-4d17-a8c.cloud.goog:9092"

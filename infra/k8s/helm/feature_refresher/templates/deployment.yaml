@@ -23,5 +23,14 @@ spec:
         envFrom:
         - configMapRef:
             name: {{ .Values.featureRefresher.name }}-configmap
+        volumeMounts:
+        - name: kafka-certs
+          mountPath: /app/certs
+          readOnly: true
         resources:
           {{- toYaml .Values.featureRefresher.resources | nindent 10 }}
+      volumes:
+      - name: kafka-certs
+        secret:
+          secretName: kafka-certs
+          defaultMode: 0400  

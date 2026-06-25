@@ -5,9 +5,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
     "redis==7.4.0" \
     "aiokafka>=0.14.0" \
-    "structlog==25.5.0" \
-    "google-auth==2.53.0" \
-    "requests>=2.32.0"
+    "structlog==25.5.0"
 
 COPY src/workers/base_worker.py ./src/workers/base_worker.py
 COPY src/workers/features ./src/workers/features

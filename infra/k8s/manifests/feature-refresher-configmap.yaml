@@ -12,5 +12,8 @@ data:
   KAFKA_MAX_RECORDS: "100"
   KAFKA_TIMEOUT_MS: "1000"
   PREDICTIONS_TOPIC: "predictions"
-  BOOTSTRAP_SERVERS: "bootstrap.fraud-detection.us-central1.managedkafka.project-8f21156c-3434-4d17-a8c.cloud.goog:9092"
-
+  BOOTSTRAP_SERVERS: "fraud-detection-niemhoalongvu-8584.e.aivencloud.com:17550"
+  KAFKA_SECURITY_PROTOCOL: "SSL"
+  KAFKA_SSL_CAFILE: "/app/certs/ca.pem"
+  KAFKA_SSL_CERTFILE: "/app/certs/service.cert"
+  KAFKA_SSL_KEYFILE: "/app/certs/service.key"
