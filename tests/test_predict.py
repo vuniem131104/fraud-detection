@@ -1,389 +1,233 @@
-"""Smoke-test script that scores an anomalous transaction for a given user/card pair.
+"""Unit tests for ``FraudDetectionService`` (the scoring orchestrator).
 
-It builds a deliberately anomalous current transaction (with or without prior
-transaction history) and runs it through ``FraudDetectionService`` against live
-Postgres and Redis backends, asserting the prediction probability and status are
-consistent with the chosen mode.
+The KServe inference engine is faked with ``httpx.MockTransport``; Redis,
+Postgres, Kafka and the (CPU-bound) feature builder are replaced with mocks, so
+no external services are contacted.
 """
 
-import argparse
-import asyncio
+from __future__ import annotations
+
 import json
-import os
-import sys
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any, Literal
-from uuid import uuid4
+from unittest.mock import AsyncMock, MagicMock
 
-from redis import asyncio as aioredis
-from structlog import get_logger
+import httpx
+import pandas as pd
+import pytest
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-from database import PostgresDatabase
+from fraud_detection.core import predict
 from fraud_detection.core.models import FraudDetectionInputs
 from fraud_detection.core.predict import FraudDetectionService
-from fraud_detection.features.feature_store import RedisFeatureStore
-
-logger = get_logger(__name__)
-HO_CHI_MINH_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
-Mode = Literal["with-transactions", "without-transactions"]
 
 
-@dataclass(frozen=True)
-class PredictionCase:
-    """A resolved scoring scenario: the mode, user/card identifiers, and cached Redis state."""
-
-    mode: Mode
-    user_id: str
-    card_id: str
-    redis_state: dict[str, Any]
-
-    @property
-    def previous_transaction_count(self) -> int:
-        """Return the number of prior transactions recorded in the cached Redis state."""
-        transactions = self.redis_state.get("transactions", [])
-        return len(transactions) if isinstance(transactions, list) else 0
-
-
-def load_dotenv() -> None:
-    """Load key/value pairs from the project ``.env`` file into the environment if present."""
-    env_path = PROJECT_ROOT / ".env"
-    if not env_path.exists():
-        return
-
-    for raw_line in env_path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, value = line.split("=", 1)
-        os.environ.setdefault(name.strip(), value.strip().strip("\"'"))
-
-
-def parse_args() -> argparse.Namespace:
-    """Load the .env file and parse CLI arguments for the prediction smoke check."""
-    load_dotenv()
-    parser = argparse.ArgumentParser(
-        description="Run fraud prediction smoke checks with or without prior transactions."
+@pytest.fixture
+def service(kserve_env, schema) -> FraudDetectionService:
+    """A service instance with mocked feature store / database (no open() called)."""
+    feature_store = MagicMock()
+    feature_store.get_txs = AsyncMock()
+    feature_store.redis_client = MagicMock()
+    database = MagicMock()
+    database.execute = AsyncMock(return_value="INSERT 0 1")
+    return FraudDetectionService(
+        schema=schema, feature_store=feature_store, database=database, threshold=0.5
     )
-    parser.add_argument("user_id", help="User id to score.")
-    parser.add_argument("card_id", help="Card id to score.")
-    transaction_group = parser.add_mutually_exclusive_group()
-    transaction_group.add_argument(
-        "--with-transactions",
-        dest="with_transactions",
-        action="store_true",
-        default=True,
-        help="Require previous transactions for this user/card pair. This is the default.",
+
+
+# ---------------------------------------------------------------------------
+# __init__ / to_float
+# ---------------------------------------------------------------------------
+
+def test_init_requires_kserve_url(monkeypatch, schema):
+    monkeypatch.delenv("KSERVE_URL", raising=False)
+    with pytest.raises(ValueError, match="KSERVE_URL"):
+        FraudDetectionService(schema=schema, feature_store=MagicMock(), database=MagicMock())
+
+
+def test_to_float_static():
+    assert FraudDetectionService.to_float(None, "f") == 0.0
+    assert FraudDetectionService.to_float("", "f") == 0.0
+    assert FraudDetectionService.to_float(float("nan"), "f") == 0.0
+    assert FraudDetectionService.to_float(float("inf"), "f", default=2.0) == 2.0
+    assert FraudDetectionService.to_float("5", "f") == 5.0
+    with pytest.raises(ValueError):
+        FraudDetectionService.to_float("abc", "f")
+
+
+# ---------------------------------------------------------------------------
+# predict_with_kserve
+# ---------------------------------------------------------------------------
+
+async def test_predict_with_kserve_success(service):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"outputs": [{"name": "output-0", "data": [0.77]}]})
+
+    service.kserve_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    probability = await service.predict_with_kserve(pd.DataFrame([{"a": 1.0, "b": 2.0}]))
+
+    assert probability == pytest.approx(0.77)
+    body = captured["body"]["inputs"][0]
+    assert body["shape"] == [1, 2]
+    assert body["datatype"] == "FP32"
+    assert body["data"] == [[1.0, 2.0]]
+    await service.kserve_client.aclose()
+
+
+async def test_predict_with_kserve_http_status_error(service):
+    service.kserve_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(500, text="boom"))
     )
-    transaction_group.add_argument(
-        "--without-transactions",
-        dest="with_transactions",
-        action="store_false",
-        help="Require no previous transactions for this user/card pair.",
+    with pytest.raises(RuntimeError, match="status 500"):
+        await service.predict_with_kserve(pd.DataFrame([{"a": 1.0}]))
+    await service.kserve_client.aclose()
+
+
+async def test_predict_with_kserve_invalid_response(service):
+    service.kserve_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"nope": 1}))
     )
-    parser.add_argument(
-        "--model-dir",
-        default=os.getenv("MODEL_DIR", str(PROJECT_ROOT / "models")),
-        help="Directory containing feature_schema.json.",
-    )
-    parser.add_argument(
-        "--min-history-review-probability",
-        type=float,
-        default=float(os.getenv("PREDICT_MIN_HISTORY_REVIEW_PROBABILITY", "0")),
-        help="Optional minimum review probability for the with-transactions anomalous case.",
-    )
-    return parser.parse_args()
+    with pytest.raises(RuntimeError, match="invalid"):
+        await service.predict_with_kserve(pd.DataFrame([{"a": 1.0}]))
+    await service.kserve_client.aclose()
 
 
-def load_schema(model_dir: str) -> dict[str, Any]:
-    """Load ``feature_schema.json`` from the model directory, raising if it is missing."""
-    schema_path = Path(model_dir) / "feature_schema.json"
-    if schema_path.exists():
-        return json.loads(schema_path.read_text())
-
-    raise FileNotFoundError("Feature schema not found")
-
-
-def issuer_numeric(issuer_code: str) -> int:
-    """Extract the digits from an issuer code and return them as an integer (0 if none)."""
-    digits = "".join(character for character in issuer_code if character.isdigit())
-    return int(digits or 0)
-
-
-async def transaction_count(
-    database: PostgresDatabase,
-    user_id: str,
-    card_id: str,
-) -> int | None:
-    """Return the transaction count for a user/card from Postgres, or None if the card is absent."""
-    async with database.connection() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT
-                COUNT(c.id) AS card_count,
-                COUNT(t.id) AS transaction_count
-            FROM application.cards AS c
-            LEFT JOIN application.transactions AS t
-                ON t.user_id = c.user_id
-               AND t.card_id = c.id
-            WHERE c.user_id = $1
-              AND c.id = $2
-            """,
-            user_id,
-            card_id,
+async def test_predict_with_kserve_empty_data(service):
+    service.kserve_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, json={"outputs": [{"name": "o", "data": []}]})
         )
-
-    if row is None or int(row["card_count"]) == 0:
-        return None
-    return int(row["transaction_count"])
-
-
-def redis_state_matches_mode(redis_state: dict[str, Any], mode: Mode) -> bool:
-    """Check whether the cached Redis transaction history matches the expected mode."""
-    transactions = redis_state.get("transactions", [])
-    transaction_count = len(transactions) if isinstance(transactions, list) else 0
-    if mode == "with-transactions":
-        return transaction_count > 0
-    return transaction_count == 0
-
-
-async def resolve_prediction_case(
-    database: PostgresDatabase,
-    feature_store: RedisFeatureStore,
-    user_id: str,
-    card_id: str,
-    mode: Mode,
-) -> PredictionCase:
-    """Validate Postgres and Redis history against the mode and build the matching PredictionCase."""
-    count = await transaction_count(database, user_id, card_id)
-    if count is None:
-        raise ValueError(f"No card found for user_id={user_id}, card_id={card_id}")
-    if mode == "with-transactions" and count == 0:
-        raise ValueError(f"Expected Postgres history for user_id={user_id}, card_id={card_id}")
-    if mode == "without-transactions" and count > 0:
-        raise ValueError(f"Expected no Postgres history for user_id={user_id}, card_id={card_id}")
-
-    redis_state = await feature_store.get_txs(user_id, card_id)
-    if not redis_state_matches_mode(redis_state, mode):
-        raise ValueError(f"Redis history does not match mode={mode} for user_id={user_id}, card_id={card_id}")
-    return PredictionCase(mode, user_id, card_id, redis_state)
-
-
-async def load_card_profile(
-    database: PostgresDatabase,
-    user_id: str,
-    card_id: str,
-) -> dict[str, Any]:
-    """Load the card profile (issuer, brand, type, latest purchaser email, etc.) from Postgres."""
-    async with database.connection() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT
-                c.issuer_code,
-                c.country AS card_country,
-                c.brand AS card_brand,
-                c.bin_code,
-                c.type AS card_type,
-                c.created_at AS card_created_at,
-                COALESCE(t.email_purchaser, u.email) AS email_purchaser
-            FROM application.cards AS c
-            JOIN application.users AS u
-                ON u.id = c.user_id
-            LEFT JOIN LATERAL (
-                SELECT email_purchaser
-                FROM application.transactions
-                WHERE user_id = c.user_id
-                  AND card_id = c.id
-                ORDER BY created_at DESC
-                LIMIT 1
-            ) AS t ON TRUE
-            WHERE c.user_id = $1
-              AND c.id = $2
-            """,
-            user_id,
-            card_id,
-        )
-
-    if row is None:
-        raise ValueError(f"No card found for user_id={user_id}, card_id={card_id}")
-    return dict(row)
-
-
-def build_anomalous_current_transaction(
-    prediction_case: PredictionCase,
-    card_profile: dict[str, Any],
-    event_timestamp: str | None = None,
-) -> dict[str, Any]:
-    """Build a deliberately anomalous current-transaction payload that mismatches the card profile."""
-    if prediction_case.mode == "with-transactions" and prediction_case.previous_transaction_count == 0:
-        raise ValueError(
-            f"No Redis transaction history found for user_id={prediction_case.user_id}, "
-            f"card_id={prediction_case.card_id}"
-        )
-    if prediction_case.mode == "without-transactions" and prediction_case.previous_transaction_count > 0:
-        raise ValueError(
-            f"Unexpected Redis transaction history found for user_id={prediction_case.user_id}, "
-            f"card_id={prediction_case.card_id}"
-        )
-
-    timestamp = event_timestamp or datetime.now(HO_CHI_MINH_TZ).replace(microsecond=0).isoformat()
-    tx_id = uuid4().hex
-
-    return {
-        "tx_id": tx_id,
-        "user_id": prediction_case.user_id,
-        "card_id": prediction_case.card_id,
-        "amount_usd": 1_000_000_000.0,
-        "channel": "C",
-        "issuer_code": 99999 if issuer_numeric(card_profile["issuer_code"]) != 99999 else 404,
-        "card_brand": "discover" if card_profile["card_brand"] != "discover" else "visa",
-        "card_country": 840,
-        "bin_code": "468878",
-        "card_type": "credit" if card_profile["card_type"] != "credit" else "debit",
-        "billing_zone": 999,
-        "billing_country": card_profile["card_country"],
-        "email_purchaser": "buyer@gmail.com",
-        "email_recipient": f"cashout.{prediction_case.card_id}@protonmail.com",
-        "device_type": "missing",
-        "device_info": "UnknownRootedAndroid X999",
-        "os_raw": "Windows 11",
-        "browser_raw": "chrome 80.0",
-        "screen_resolution": "1366x768",
-        "event_timestamp": timestamp,
-        "C1": 45,
-        "C2": 39,
-        "C13": 0,
-        "M1": "F",
-        "M2": "T",
-        "M6": "F",
-    }
-
-
-def validate_prediction(
-    mode: Mode,
-    probability: float,
-    status: str,
-    min_history_review_probability: float,
-) -> None:
-    """Assert the probability is in [0, 1] and, for with-transactions mode, the status is "review"."""
-    if not 0 <= probability <= 1:
-        raise AssertionError(f"Expected probability in [0, 1], got {probability:.6f}")
-    if mode == "with-transactions":
-        if status != "review":
-            raise AssertionError(
-                f"Expected anomalous transaction with previous transactions to be reviewed, got "
-                f"status={status}, probability={probability:.6f}"
-            )
-        if min_history_review_probability > 0 and probability < min_history_review_probability:
-            raise AssertionError(
-                f"Expected anomalous transaction with previous transactions probability >= "
-                f"{min_history_review_probability:.2f}, got {probability:.6f}"
-            )
-
-
-async def run_prediction_case(
-    mode: Mode,
-    user_id: str,
-    card_id: str,
-    service: FraudDetectionService,
-    database: PostgresDatabase,
-    feature_store: RedisFeatureStore,
-    min_history_review_probability: float,
-) -> dict[str, Any]:
-    """Resolve the case, score the anomalous transaction, validate it, and return a result summary."""
-    prediction_case = await resolve_prediction_case(
-        database,
-        feature_store,
-        user_id,
-        card_id,
-        mode,
     )
-    card_profile = await load_card_profile(
-        database,
-        prediction_case.user_id,
-        prediction_case.card_id,
+    with pytest.raises(RuntimeError, match="invalid"):
+        await service.predict_with_kserve(pd.DataFrame([{"a": 1.0}]))
+    await service.kserve_client.aclose()
+
+
+async def test_predict_with_kserve_timeout(service):
+    def handler(request):
+        raise httpx.TimeoutException("slow")
+
+    service.kserve_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError, match="timed out"):
+        await service.predict_with_kserve(pd.DataFrame([{"a": 1.0}]))
+    await service.kserve_client.aclose()
+
+
+async def test_predict_with_kserve_request_error(service):
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    service.kserve_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError, match="request failed"):
+        await service.predict_with_kserve(pd.DataFrame([{"a": 1.0}]))
+    await service.kserve_client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# predict (full pipeline, everything mocked)
+# ---------------------------------------------------------------------------
+
+async def test_predict_full_pipeline(service, monkeypatch, transaction_payload):
+    service.feature_store.get_txs = AsyncMock(
+        return_value={
+            "user_id": "user-1", "card_id": "c",
+            "features": {"no_transactions_30_days": 2}, "transactions": [{"x": 1}],
+        }
     )
-    current_transaction = build_anomalous_current_transaction(
-        prediction_case=prediction_case,
-        card_profile=card_profile,
+    monkeypatch.setattr(
+        predict, "build_model_inputs", lambda payload, schema: pd.DataFrame([{"f1": 1.0, "f2": 2.0}])
     )
-    details = await service.predict(FraudDetectionInputs(**current_transaction))
-    validate_prediction(
-        mode=mode,
-        probability=details.probability,
-        status=details.status,
-        min_history_review_probability=min_history_review_probability,
+    service.predict_with_kserve = AsyncMock(return_value=0.9)
+    service.producer = AsyncMock()
+
+    result = await service.predict(FraudDetectionInputs(**transaction_payload))
+
+    assert result.tx_id == "tx-100"
+    assert result.probability == 0.9
+    assert result.prediction == 1                      # 0.9 >= threshold 0.5
+    service.feature_store.get_txs.assert_awaited_once()
+    service.predict_with_kserve.assert_awaited_once()
+    service.database.execute.assert_awaited_once()     # feature snapshot persisted
+    service.producer.send_and_wait.assert_awaited_once()
+
+
+async def test_predict_missing_identifiers_raises(service):
+    fake_inputs = MagicMock()
+    fake_inputs.model_dump.return_value = {"tx_id": "t", "card_id": "c"}  # no user_id
+    with pytest.raises(ValueError, match="user_id and card_id"):
+        await service.predict(fake_inputs)
+
+
+async def test_predict_build_failure_raises(service, monkeypatch, transaction_payload):
+    service.feature_store.get_txs = AsyncMock(
+        return_value={"features": {}, "transactions": []}  # also exercises the "empty" warning
     )
-    return {
-        "mode": mode,
-        "user_id": prediction_case.user_id,
-        "card_id": prediction_case.card_id,
-        "previous_transactions": prediction_case.previous_transaction_count,
-        "tx_id": details.tx_id,
-        "probability": round(details.probability, 6),
-        "status": details.status,
-    }
+
+    def boom(payload, schema):
+        raise RuntimeError("bad features")
+
+    monkeypatch.setattr(predict, "build_model_inputs", boom)
+    with pytest.raises(RuntimeError, match="Failed to build model inputs"):
+        await service.predict(FraudDetectionInputs(**transaction_payload))
 
 
-async def main_async(args: argparse.Namespace) -> int:
-    """Wire up Redis/Postgres/service, run the prediction case for the chosen mode, and print the result."""
-    mode: Mode = "with-transactions" if args.with_transactions else "without-transactions"
-    redis_client = aioredis.Redis(
-        host=os.getenv("REDIS_HOST"),
-        port=int(os.getenv("REDIS_PORT")),
-        db=int(os.getenv("REDIS_DB")),
-        decode_responses=True,
+async def test_predict_tolerates_snapshot_and_kafka_failures(
+    service, monkeypatch, transaction_payload
+):
+    service.feature_store.get_txs = AsyncMock(
+        return_value={"features": {"no_transactions_30_days": 1}, "transactions": [{"x": 1}]}
     )
-    postgres_client = PostgresDatabase.from_env()
-    schema = load_schema(model_dir=args.model_dir)
-    service: FraudDetectionService | None = None
-    try:
-        feature_store = RedisFeatureStore(redis_client)
-        service = FraudDetectionService(
-            schema=schema,
-            feature_store=feature_store,
-            database=postgres_client,
-            threshold=0.5,
-        )
-        await service.open()
-        result = await run_prediction_case(
-            mode=mode,
-            user_id=args.user_id,
-            card_id=args.card_id,
-            service=service,
-            database=postgres_client,
-            feature_store=feature_store,
-            min_history_review_probability=args.min_history_review_probability,
-        )
-    except Exception:
-        logger.exception(
-            "Fraud prediction failed",
-            extra={
-                "mode": mode,
-                "user_id": args.user_id,
-                "card_id": args.card_id,
-            },
-        )
-        raise
-    finally:
-        if service is not None:
-            await service.close()
-        else:
-            await postgres_client.close()
-            await redis_client.aclose()
+    monkeypatch.setattr(predict, "build_model_inputs", lambda p, s: pd.DataFrame([{"f1": 1.0}]))
+    service.predict_with_kserve = AsyncMock(return_value=0.2)        # below threshold
+    service.database.execute = AsyncMock(side_effect=Exception("db down"))
+    service.producer = AsyncMock()
+    service.producer.send_and_wait = AsyncMock(side_effect=Exception("kafka down"))
 
-    print(json.dumps(result, indent=2))
-    return 0
+    result = await service.predict(FraudDetectionInputs(**transaction_payload))
+
+    assert result.prediction == 0
+    assert result.probability == 0.2
 
 
-def main() -> int:
-    """Parse arguments and run the async smoke check via ``asyncio.run``."""
-    return asyncio.run(main_async(parse_args()))
+# ---------------------------------------------------------------------------
+# open / close lifecycle
+# ---------------------------------------------------------------------------
+
+async def test_open(service, monkeypatch):
+    service.database.open = AsyncMock()
+    service.feature_store.redis_client.ping = AsyncMock()
+    service.kserve_client = AsyncMock()
+    monkeypatch.setattr(predict.ssl, "create_default_context", lambda **kw: MagicMock())
+    fake_producer = AsyncMock()
+    monkeypatch.setattr(predict, "AIOKafkaProducer", MagicMock(return_value=fake_producer))
+
+    await service.open()
+
+    service.database.open.assert_awaited_once()
+    service.feature_store.redis_client.ping.assert_awaited_once()
+    fake_producer.start.assert_awaited_once()
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+async def test_close(service):
+    service.database.close = AsyncMock()
+    service.feature_store.redis_client.aclose = AsyncMock()
+    service.kserve_client = AsyncMock()
+    service.producer = AsyncMock()
+
+    await service.close()
+
+    service.database.close.assert_awaited_once()
+    service.feature_store.redis_client.aclose.assert_awaited_once()
+    service.producer.stop.assert_awaited_once()
+
+
+async def test_close_without_producer(service):
+    """close() is safe when the Kafka producer was never started."""
+    service.database.close = AsyncMock()
+    service.feature_store.redis_client.aclose = AsyncMock()
+    service.kserve_client = AsyncMock()
+    service.producer = None
+
+    await service.close()  # must not raise
+
+    service.database.close.assert_awaited_once()
