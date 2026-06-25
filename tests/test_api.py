@@ -35,6 +35,7 @@ HO_CHI_MINH_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
 # ---------------------------------------------------------------------------
 
 def load_dotenv() -> None:
+    """Load key/value pairs from the project ``.env`` file into the environment if present."""
     env_path = PROJECT_ROOT / ".env"
     if not env_path.exists():
         return
@@ -47,6 +48,7 @@ def load_dotenv() -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Load the .env file and parse CLI arguments (user/card, --anomalous, --max-attempts)."""
     load_dotenv()
     parser = argparse.ArgumentParser(
         description="Test the fraud-detection API.",
@@ -78,6 +80,7 @@ def fetch_card_profile(user_id: str, card_id: str) -> dict:
     import asyncpg
 
     async def _query():
+        """Connect to Postgres and fetch the card profile row for the user/card pair."""
         conn = await asyncpg.connect(
             host=os.getenv("POSTGRES_HOST", "localhost"),
             port=int(os.getenv("POSTGRES_PORT", "5432")),
@@ -117,6 +120,7 @@ def fetch_card_profile(user_id: str, card_id: str) -> dict:
 
 
 def build_normal_payload(user_id: str, card_id: str) -> dict:
+    """Build a typical, low-risk transaction payload for the given user/card pair."""
     return {
         "tx_id":             uuid4().hex,
         "user_id":           user_id,
@@ -215,6 +219,7 @@ def build_anomalous_payload(user_id: str, card_id: str, card_profile: dict) -> d
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    """Send a single normal payload, or repeatedly send anomalous payloads until fraud is predicted."""
     args = parse_args()
 
     if not args.anomalous:

@@ -1,3 +1,13 @@
+"""Feature engineering helpers for building model inputs from raw transactions.
+
+Provides value-coercion utilities, transaction normalization, device/OS/browser
+and email parsing, time-based and aggregate (UID/card history) feature
+construction, schema application (frequency tables and categorical encoders) and
+final feature-vector assembly. ``build_model_inputs`` ties these together to turn
+a transaction payload (current transaction plus Redis history) into the model's
+expected feature DataFrame.
+"""
+
 from __future__ import annotations
 
 import math
@@ -38,6 +48,11 @@ MODEL_TO_CHANNEL = {
 }
 
 def to_number(value: Any, default: float = np.nan) -> float:
+    """Coerce a value to a float, returning ``default`` when it cannot be parsed.
+
+    ``None`` and blank strings yield ``default``; unlike :func:`to_float` this
+    never raises and never rejects non-finite numbers.
+    """
     if value is None:
         return default
     try:
@@ -49,6 +64,21 @@ def to_number(value: Any, default: float = np.nan) -> float:
 
 
 def to_float(value: Any, feature: str, default: float | None = None) -> float | None:
+    """Coerce a feature value to a finite float, falling back to ``default``.
+
+    ``None``, NaN, blank strings and non-finite numbers yield ``default``.
+
+    Args:
+        value: The raw feature value to convert.
+        feature: Feature name, used only for logging/error messages.
+        default: Value returned for missing or non-finite inputs.
+
+    Returns:
+        The parsed finite float, or ``default``.
+
+    Raises:
+        ValueError: If ``value`` is non-empty but cannot be parsed as a number.
+    """
     if value is None or pd.isna(value):
         return default
     if isinstance(value, str) and not value.strip():
@@ -68,6 +98,7 @@ def to_float(value: Any, feature: str, default: float | None = None) -> float | 
 
 
 def to_int_like(value: Any, default: int = 0) -> int:
+    """Coerce a value to an int, returning ``default`` for missing/NaN inputs."""
     number = to_number(value, default=float(default))
     if math.isnan(number):
         return default
@@ -75,6 +106,12 @@ def to_int_like(value: Any, default: int = 0) -> int:
 
 
 def to_model_card_id(value: Any, default: int = 0) -> int:
+    """Convert a card identifier to the integer form expected by the model.
+
+    A 32-character lowercase hex string (e.g. a UUID hex) is parsed as base-16
+    and reduced modulo ``2_147_483_647`` to fit an int32 range; any other value
+    falls back to :func:`to_int_like`.
+    """
     if isinstance(value, str):
         identifier = value.strip().lower()
         if len(identifier) == 32 and all(
@@ -85,6 +122,14 @@ def to_model_card_id(value: Any, default: int = 0) -> int:
 
 
 def local_timestamp(value: Any) -> pd.Timestamp:
+    """Parse a value into a naive Ho Chi Minh local ``pd.Timestamp``.
+
+    Timezone-aware inputs are converted to the Ho Chi Minh timezone and then made
+    naive (tz dropped) so all timestamps share a common local reference.
+
+    Raises:
+        ValueError: If ``value`` is ``None``.
+    """
     if value is None:
         raise ValueError("Transaction must include created_at or event_timestamp")
     timestamp = pd.Timestamp(value)
@@ -94,6 +139,11 @@ def local_timestamp(value: Any) -> pd.Timestamp:
 
 
 def event_offset_seconds(row: dict[str, Any], schema: dict[str, Any]) -> float:
+    """Return the transaction's event time as seconds since the training reference.
+
+    Uses an explicit ``event_ts_offset_s`` if present, otherwise computes the
+    offset of ``event_timestamp`` from ``schema["training_reference_ts"]``.
+    """
     explicit = row.get("event_ts_offset_s")
     if explicit is not None:
         return float(explicit)
@@ -108,6 +158,21 @@ def normalize_transaction(
     *,
     feature_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Normalize a raw transaction into a consistent, typed feature dictionary.
+
+    Selects the known fields, fills count/time-delta/match features (``C*``/``D*``/
+    ``M*``) from the transaction or the optional feature snapshot, derives missing
+    values (e.g. ``C13`` from the prior 30-day count, ``D4``/``D15`` from card age
+    and recency), and coerces every field to its expected numeric or categorical
+    type with sensible defaults.
+
+    Args:
+        transaction: The raw transaction fields.
+        feature_snapshot: Optional historical feature snapshot used to fill gaps.
+
+    Returns:
+        A dictionary of normalized, type-coerced feature values.
+    """
     row = dict(transaction)
     snapshot = dict(feature_snapshot or {})
 
@@ -178,6 +243,12 @@ def normalize_transaction(
 
 
 def device_brand(value: str) -> str:
+    """Derive a coarse device brand/platform label from a device info string.
+
+    Returns ``"missing"`` for empty/``nan`` input, matches a set of known brand
+    or platform keywords, and otherwise falls back to the leading token (or
+    ``"other"``).
+    """
     text = value.lower().strip()
     if not text or text == "nan":
         return "missing"
@@ -212,6 +283,11 @@ def device_brand(value: str) -> str:
 
 
 def os_family(value: str) -> str:
+    """Map a raw OS string to a coarse family label.
+
+    Returns one of the known families (windows/ios/android/mac/linux),
+    ``"other"`` for any other non-empty value, or ``"missing"`` when empty/``nan``.
+    """
     text = value.lower()
     for key in ("windows", "ios", "android", "mac", "linux"):
         if key in text:
@@ -220,6 +296,12 @@ def os_family(value: str) -> str:
 
 
 def browser_family(value: str) -> str:
+    """Map a raw browser string to a coarse family label.
+
+    Returns one of the known families (chrome/safari/firefox/edge/opera/samsung/
+    ie/android), ``"other"`` for any other non-empty value, or ``"missing"`` when
+    empty/``nan``.
+    """
     text = value.lower()
     for key in ("chrome", "safari", "firefox", "edge", "opera", "samsung", "ie ", "android"):
         if key in text:
@@ -228,6 +310,12 @@ def browser_family(value: str) -> str:
 
 
 def add_identity_features(df: pd.DataFrame) -> None:
+    """Add device, OS, browser and screen identity features to ``df`` in place.
+
+    Cleans the raw device/OS/browser strings, derives brand/family labels and
+    numeric versions, and parses the screen resolution into width, height and
+    area columns.
+    """
     device_info = df.get("device_info", pd.Series(["missing"] * len(df), index=df.index))
     device_info = device_info.fillna("missing").astype(str)
     df["device_info"] = device_info
@@ -266,6 +354,20 @@ def add_identity_features(df: pd.DataFrame) -> None:
 
 
 def build_base_features(rows: list[dict[str, Any]], schema: dict[str, Any]) -> pd.DataFrame:
+    """Build the base (non-aggregate) feature DataFrame for one or more rows.
+
+    Computes each row's event time offset, derives time-of-day/weekend and amount
+    features, adds identity features, maps email providers (treating null-domains
+    as missing) and constructs the hierarchical ``uid1``-``uid4`` grouping keys.
+
+    Args:
+        rows: Normalized transaction dictionaries.
+        schema: Feature schema providing the training reference time, email
+            mappings and related configuration.
+
+    Returns:
+        A DataFrame with one row per input transaction and the base feature set.
+    """
     clean_rows = []
     for row in rows:
         clean = dict(row)
@@ -299,6 +401,7 @@ def build_base_features(rows: list[dict[str, Any]], schema: dict[str, Any]) -> p
     first_seen_day = (day - df["card_age_days"].fillna(0).astype(int)).astype(str)
 
     def as_string(col: str) -> pd.Series:
+        """Return ``df[col]`` as filled strings, or a ``"missing"`` series if absent."""
         if col not in df.columns:
             return pd.Series(["missing"] * len(df), index=df.index)
         return df[col].fillna("missing").astype(str)
@@ -311,6 +414,12 @@ def build_base_features(rows: list[dict[str, Any]], schema: dict[str, Any]) -> p
 
 
 def init_history_defaults(df: pd.DataFrame, schema: dict[str, Any]) -> None:
+    """Initialize history-derived aggregate feature columns to defaults in place.
+
+    Seeds the per-UID mean/std columns to NaN and the per-card running
+    count/sum/mean and amount z-score columns to their empty-history defaults, so
+    they exist even when no prior transactions are available.
+    """
     for uid in schema.get("uid_columns", ["uid1", "uid2", "uid3", "uid4"]):
         for col in schema.get("uid_agg_targets", ["amount_usd", "C13", "D15", "D4"]):
             df[f"{uid}_{col}_mean"] = np.nan
@@ -328,6 +437,19 @@ def apply_previous_transactions(
     schema: dict[str, Any],
     feature_snapshot: dict[str, Any] | None,
 ) -> None:
+    """Populate history-based aggregate features from previous transactions in place.
+
+    Builds base features for the prior transactions, keeps only those strictly
+    before the current event, and computes per-UID mean/std of the aggregate
+    targets plus per-card running count, sum, mean and amount z-score. No-ops when
+    there is no usable history.
+
+    Args:
+        df: Single-row DataFrame for the current transaction, updated in place.
+        previous_transactions: Prior transactions for the same user/card.
+        schema: Feature schema providing UID columns and aggregation targets.
+        feature_snapshot: Optional snapshot used when normalizing history rows.
+    """
     if not previous_transactions:
         return
 
@@ -367,6 +489,15 @@ def apply_previous_transactions(
 
 
 def apply_schema(df: pd.DataFrame, schema: dict[str, Any]) -> pd.DataFrame:
+    """Apply frequency encodings and categorical encoders defined by the schema.
+
+    Adds ``<col>_freq`` columns from the schema's frequency tables, drops the
+    intermediate UID columns, and replaces categorical columns with their encoded
+    integer codes (filling absent columns with the encoder's missing default).
+
+    Returns:
+        The transformed DataFrame.
+    """
     for col, table in schema.get("freq_tables", {}).items():
         if col not in df.columns:
             continue
@@ -392,6 +523,14 @@ def apply_schema(df: pd.DataFrame, schema: dict[str, Any]) -> pd.DataFrame:
 
 
 def assemble_vector(df: pd.DataFrame, schema: dict[str, Any]) -> pd.DataFrame:
+    """Select and order the final model feature columns from ``df``.
+
+    Adds any feature columns missing from ``df`` as NaN, restricts to the schema's
+    ``feature_columns`` in order, and coerces remaining object columns to numeric.
+
+    Returns:
+        The model-ready feature DataFrame.
+    """
     feature_columns = schema["feature_columns"]
     missing_columns = [col for col in feature_columns if col not in df.columns]
     if missing_columns:
@@ -406,6 +545,16 @@ def assemble_vector(df: pd.DataFrame, schema: dict[str, Any]) -> pd.DataFrame:
 
 
 def history_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Extract the feature snapshot and previous transactions from a payload.
+
+    Tolerates missing or malformed sections and supports a nested ``history``
+    block (with ``feature_snapshot`` and ``previous_transactions``) as an
+    alternative source, merging snapshot features and only using nested
+    transactions when no top-level ones are present.
+
+    Returns:
+        A tuple of ``(features, previous_transactions)``.
+    """
     features = payload.get("features", {})
     if not isinstance(features, dict):
         features = {}
@@ -427,6 +576,14 @@ def history_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], list[
 
 
 def current_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract the current transaction from a payload.
+
+    Uses the ``current_transaction`` key if present, otherwise treats the payload
+    itself as the transaction.
+
+    Raises:
+        TypeError: If the resolved current transaction is not a mapping.
+    """
     current = payload.get("current_transaction", payload)
     if not isinstance(current, dict):
         raise TypeError("payload current_transaction must be an object")
@@ -436,6 +593,19 @@ def build_model_inputs(
     payload: dict[str, Any],
     schema: dict[str, Any],
 ) -> pd.DataFrame:
+    """Build the complete model feature vector from a transaction payload.
+
+    Orchestrates the full pipeline: extracts history and the current transaction,
+    normalizes it, builds base features, initializes and fills history aggregates,
+    applies schema encodings and assembles the final feature DataFrame.
+
+    Args:
+        payload: Payload containing the current transaction and optional history.
+        schema: Feature schema driving normalization, encoding and column order.
+
+    Returns:
+        The model-ready feature DataFrame.
+    """
     features, previous_transactions = history_from_payload(payload)
     current = normalize_transaction(current_from_payload(payload), feature_snapshot=features)
     df = build_base_features([current], schema)
@@ -449,6 +619,19 @@ def enrich_current_transaction_with_redis_features(
     current_transaction: dict[str, Any],
     redis_state: dict[str, Any],
 ) -> dict[str, Any]:
+    """Fill the current transaction's ``C13``/``D4``/``D15`` from Redis state.
+
+    When these features are absent or zero, derives them from the cached 30-day
+    transaction count, card age and days-since-last-transaction so the model sees
+    history-aware values.
+
+    Args:
+        current_transaction: The current transaction dict, mutated and returned.
+        redis_state: Cached ``features`` and ``transactions`` for the user/card.
+
+    Returns:
+        The updated current transaction dictionary.
+    """
     features = redis_state.get("features", {})
     transactions = redis_state.get("transactions", [])
     if not isinstance(features, dict):
@@ -476,6 +659,11 @@ def enrich_current_transaction_with_redis_features(
     return current_transaction
 
 def normalize_email(transaction: dict[str, Any]) -> dict[str, Any]:
+    """Reduce purchaser/recipient emails to their lowercased domain.
+
+    Returns a copy of the transaction where each email field is trimmed,
+    lowercased and replaced by the part after ``@`` (the domain) when present.
+    """
     normalized_transaction = transaction.copy()
     for col in ("email_purchaser", "email_recipient"):
         email = normalized_transaction.get(col, "")

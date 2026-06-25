@@ -1,3 +1,11 @@
+"""Daily batch job that ages out old transactions and refreshes Redis features.
+
+Scans every per-(user, card) transaction sorted set in Redis, removes
+transactions older than a configurable cutoff, and recomputes the associated
+feature hash (rolling transaction count, card age, and recency of the last
+transaction). Designed to be run as a scheduled command-line job.
+"""
+
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
 import argparse
@@ -26,6 +34,12 @@ return {removed, remaining, latest, card_created_at}
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the refresh job.
+
+    Returns:
+        The parsed arguments with ``cutoff_days``, ``concurrency`` and
+        ``scan_count`` attributes.
+    """
     parser = argparse.ArgumentParser(description="Remove old transactions and refresh feature counts.")
     parser.add_argument("--cutoff-days", type=int, default=30)
     parser.add_argument("--concurrency", type=int, default=25)
@@ -34,6 +48,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def features_key_from_transactions_key(transactions_key: str) -> str:
+    """Derive the features key matching a given transactions key.
+
+    Args:
+        transactions_key: A Redis transactions key.
+
+    Returns:
+        The corresponding features key, sharing the same user/card suffix.
+
+    Raises:
+        ValueError: If the key does not start with the expected transactions
+            prefix.
+    """
     if not transactions_key.startswith(TRANSACTIONS_KEY_PREFIX):
         raise ValueError(f"Unexpected transactions key: {transactions_key}")
 
@@ -41,21 +67,53 @@ def features_key_from_transactions_key(transactions_key: str) -> str:
 
 
 def local_now() -> datetime:
+    """Return the current time in the Ho Chi Minh timezone."""
     return datetime.now(HO_CHI_MINH_TZ)
 
 
 def to_local_time(value: datetime) -> datetime:
+    """Convert a datetime to the Ho Chi Minh timezone.
+
+    Naive datetimes are assumed to already be in local time and are simply
+    tagged with the timezone; aware datetimes are converted.
+
+    Args:
+        value: The datetime to localize.
+
+    Returns:
+        The datetime expressed in the Ho Chi Minh timezone.
+    """
     if value.tzinfo is None:
         return value.replace(tzinfo=HO_CHI_MINH_TZ)
     return value.astimezone(HO_CHI_MINH_TZ)
 
 
 def parse_datetime(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp string into a local datetime.
+
+    Accepts a trailing ``Z`` UTC designator and normalizes the result to the
+    Ho Chi Minh timezone.
+
+    Args:
+        value: An ISO-8601 timestamp string.
+
+    Returns:
+        The parsed datetime in the Ho Chi Minh timezone.
+    """
     timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return to_local_time(timestamp)
 
 
 def days_between(start: datetime, end: datetime) -> float:
+    """Return the number of days between two datetimes, clamped at zero.
+
+    Args:
+        start: The earlier datetime.
+        end: The later datetime.
+
+    Returns:
+        The elapsed time from ``start`` to ``end`` in days, never negative.
+    """
     elapsed_days = (end - start).total_seconds() / SECONDS_PER_DAY
     return max(elapsed_days, 0.0)
 
@@ -66,6 +124,24 @@ async def refresh_one_key(
     cutoff_score: int,
     now: datetime,
 ) -> tuple[int, int]:
+    """Refresh a single transactions key and its feature hash.
+
+    Runs a Lua script to atomically drop transactions older than
+    ``cutoff_score``, count the survivors, and read the latest transaction and
+    the card creation time. It then writes the recomputed features
+    (``no_transactions_30_days``, ``card_age_days``, and last-transaction
+    recency fields), clearing the recency fields when no transactions remain.
+
+    Args:
+        redis_client: The async Redis client.
+        transactions_key: The transactions sorted-set key to refresh.
+        cutoff_score: The score (epoch seconds) below which transactions are
+            removed.
+        now: The reference "current" time used for age calculations.
+
+    Returns:
+        A tuple of ``(removed_count, remaining_count)``.
+    """
     features_key = features_key_from_transactions_key(transactions_key)
     refresh_result = await redis_client.eval(
         refresh_key_script,
@@ -106,6 +182,28 @@ async def refresh_redis_data(
     concurrency: int = 25,
     scan_count: int = 100,
 ) -> dict:
+    """Scan all transaction keys and refresh them with bounded concurrency.
+
+    Iterates over every transactions key via ``SCAN`` and refreshes each one,
+    limiting in-flight refreshes to ``concurrency`` tasks and accumulating
+    aggregate statistics. If any refresh task fails, pending tasks are
+    cancelled and the exception is re-raised.
+
+    Args:
+        redis_client: The async Redis client.
+        cutoff_days: Age threshold in days beyond which transactions are
+            removed.
+        concurrency: Maximum number of concurrent key refreshes.
+        scan_count: Hint for the number of keys returned per ``SCAN`` batch.
+
+    Returns:
+        A stats dictionary with ``keys_scanned``, ``transactions_removed``
+        and ``transactions_remaining``.
+
+    Raises:
+        ValueError: If ``cutoff_days``, ``concurrency`` or ``scan_count`` is
+            less than 1.
+    """
     if cutoff_days < 1:
         raise ValueError("cutoff_days must be greater than 0")
     if concurrency < 1:
@@ -124,10 +222,31 @@ async def refresh_redis_data(
     }
 
     async def refresh_with_limit(transactions_key: str) -> tuple[int, int]:
+        """Refresh one key while holding the concurrency semaphore.
+
+        Args:
+            transactions_key: The transactions key to refresh.
+
+        Returns:
+            A tuple of ``(removed_count, remaining_count)``.
+        """
         async with semaphore:
             return await refresh_one_key(redis_client, transactions_key, cutoff_score, now)
 
     async def collect_done(done: set[asyncio.Task], pending_tasks: set[asyncio.Task]) -> None:
+        """Accumulate results from completed tasks into the stats dict.
+
+        If a completed task raised, all still-pending tasks are cancelled and
+        awaited before the exception is propagated.
+
+        Args:
+            done: The set of completed refresh tasks.
+            pending_tasks: The set of tasks still in flight, cancelled on
+                error.
+
+        Raises:
+            Exception: Re-raises any exception raised by a completed task.
+        """
         for task in done:
             try:
                 removed_count, remaining_count = task.result()
@@ -167,6 +286,18 @@ async def run_refresh(
     concurrency: int,
     scan_count: int,
 ) -> None:
+    """Run the refresh and log a summary of the work performed.
+
+    Times :func:`refresh_redis_data` and emits a structured log line with the
+    number of keys refreshed, transactions removed/remaining, the concurrency
+    used and the elapsed time.
+
+    Args:
+        redis_client: The async Redis client.
+        cutoff_days: Age threshold in days for removing transactions.
+        concurrency: Maximum number of concurrent key refreshes.
+        scan_count: Hint for the number of keys per ``SCAN`` batch.
+    """
     start = perf_counter()
 
     stats = await refresh_redis_data(
@@ -188,6 +319,12 @@ async def run_refresh(
 
 
 async def main() -> None:
+    """Entry point: build a Redis client from env and run the refresh.
+
+    Reads Redis connection settings from environment variables, creates a
+    blocking connection pool, runs the refresh with the parsed CLI arguments
+    and always closes the client afterwards.
+    """
     args = parse_args()
     redis_pool = aioredis.BlockingConnectionPool(
         host=os.getenv("REDIS_HOST"),

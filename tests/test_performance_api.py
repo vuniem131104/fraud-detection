@@ -39,6 +39,7 @@ _entity_lock = Semaphore()
 
 
 def load_dotenv() -> dict[str, str]:
+    """Read the project ``.env`` file and return its key/value pairs as a dict."""
     values: dict[str, str] = {}
     for raw_line in (PROJECT_ROOT / ".env").read_text().splitlines():
         line = raw_line.strip()
@@ -50,9 +51,11 @@ def load_dotenv() -> dict[str, str]:
 
 
 async def query_valid_entities() -> list[tuple[str, str]]:
+    """Query Postgres for valid user/card pairs, ordered by transaction count, up to ENTITY_LIMIT."""
     dotenv = load_dotenv()
 
     def env(name: str) -> str:
+        """Resolve a required setting from the environment or .env, raising if it is missing."""
         value = os.getenv(name) or dotenv.get(name)
         if not value:
             raise RuntimeError(f"Missing {name} in the environment or .env")
@@ -89,6 +92,7 @@ async def query_valid_entities() -> list[tuple[str, str]]:
 
 
 def next_entity() -> tuple[str, str]:
+    """Return the next user/card pair, cycling through the loaded entities in a thread-safe manner."""
     global _entity_index
 
     with _entity_lock:
@@ -100,6 +104,7 @@ def next_entity() -> tuple[str, str]:
 
 
 def build_payload(transaction_id: str, user_id: str, card_id: str) -> dict[str, Any]:
+    """Build a fixed scoring request payload for the given transaction and user/card pair."""
     return {
         "transaction_id": transaction_id,
         "event_timestamp": datetime.now(HO_CHI_MINH_TZ).replace(microsecond=0).isoformat(),
@@ -130,6 +135,7 @@ def build_payload(transaction_id: str, user_id: str, card_id: str) -> dict[str, 
 
 @events.test_start.add_listener
 def load_entities(environment: Any, **_: Any) -> None:
+    """On test start (worker only), load valid user/card pairs from Postgres into module state."""
     global _entities, _entity_index
 
     if isinstance(environment.runner, MasterRunner):
@@ -143,10 +149,13 @@ def load_entities(environment: Any, **_: Any) -> None:
 
 
 class FraudDetectionApiUser(HttpUser):
+    """Locust virtual user that posts scoring requests at a constant per-user throughput."""
+
     wait_time = constant_throughput(RPS_PER_USER)
 
     @task
     def score_transaction(self) -> None:
+        """POST a scoring request and fail the sample on bad status, invalid JSON, or id mismatch."""
         user_id, card_id = next_entity()
         transaction_id = uuid4().hex
         payload = build_payload(transaction_id, user_id, card_id)

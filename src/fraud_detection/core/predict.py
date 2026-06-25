@@ -1,3 +1,12 @@
+"""Fraud detection scoring service orchestrating end-to-end prediction.
+
+Defines ``FraudDetectionService``, which owns the connections to Postgres,
+Redis (feature store), the KServe inference endpoint and a Kafka producer. For
+each transaction it fetches Redis history, builds the model feature vector,
+calls KServe for a probability, persists a feature snapshot, emits the result
+to Kafka and returns the structured prediction.
+"""
+
 from __future__ import annotations
 
 import json
@@ -30,6 +39,13 @@ from uuid import uuid4
 logger = get_logger(__name__)
 
 class FraudDetectionService:
+    """Coordinates feature retrieval, model inference and result publishing.
+
+    Holds long-lived clients (database, Redis feature store, KServe HTTP client,
+    Kafka producer) and a thread pool for CPU-bound feature building. Lifecycle
+    is managed via :meth:`open` and :meth:`close`.
+    """
+
     def __init__(
         self,
         schema: dict[str, Any],
@@ -37,6 +53,21 @@ class FraudDetectionService:
         database: PostgresDatabase,
         threshold: float = 0.5,
     ) -> None:
+        """Initialize the service and its inference client configuration.
+
+        Reads KServe and feature-build settings from the environment and sets up
+        the async HTTP client used for inference. The Kafka producer is created
+        later in :meth:`open`.
+
+        Args:
+            schema: Feature schema describing how to build the model input vector.
+            feature_store: Redis-backed store for per-user/card history.
+            database: Postgres database used to persist feature snapshots.
+            threshold: Decision threshold above which a transaction is flagged.
+
+        Raises:
+            ValueError: If the ``KSERVE_URL`` environment variable is not set.
+        """
         self.schema = schema
         self.feature_store = feature_store
         self.database = database
@@ -63,6 +94,12 @@ class FraudDetectionService:
         self.predictions_topic = os.getenv("PREDICTIONS_TOPIC")
 
     async def open(self) -> None:
+        """Open all backing resources and start the Kafka producer.
+
+        Opens the database, pings Redis, enters the KServe HTTP client context
+        and starts an SSL-secured Kafka producer using environment-provided
+        bootstrap servers and certificates.
+        """
         await self.database.open()
         await self.feature_store.redis_client.ping()
         await self.kserve_client.__aenter__()
@@ -82,6 +119,11 @@ class FraudDetectionService:
         logger.info("FraudDetectionService is ready")
 
     async def close(self) -> None:
+        """Release all backing resources.
+
+        Closes the database, Redis client, KServe HTTP client and Kafka producer
+        (if started), and shuts down the feature-build thread pool.
+        """
         await self.database.close()
         await self.feature_store.redis_client.aclose()
         await self.kserve_client.aclose()
@@ -92,6 +134,22 @@ class FraudDetectionService:
         
     @staticmethod
     def to_float(value: Any, feature: str, default: float = 0.0) -> float:
+        """Coerce a feature value to a finite float.
+
+        ``None``, NaN and blank strings yield ``default``; non-finite numbers
+        also fall back to ``default``.
+
+        Args:
+            value: The raw feature value to convert.
+            feature: Feature name, used only for logging/error messages.
+            default: Value returned for missing or non-finite inputs.
+
+        Returns:
+            The parsed finite float, or ``default``.
+
+        Raises:
+            ValueError: If ``value`` is non-empty but cannot be parsed as a number.
+        """
         if value is None or pd.isna(value):
             return default
         if isinstance(value, str) and not value.strip():
@@ -110,6 +168,22 @@ class FraudDetectionService:
         return number if math.isfinite(number) else default
 
     async def predict_with_kserve(self, model_inputs: pd.DataFrame) -> float:
+        """Send the feature vector to KServe and return the fraud probability.
+
+        Builds a KServe v2 inference payload from ``model_inputs``, posts it to
+        the configured endpoint and extracts the first output value.
+
+        Args:
+            model_inputs: Single-row (or multi-row) feature DataFrame whose
+                columns map to the model's expected features.
+
+        Returns:
+            The fraud probability returned by the model.
+
+        Raises:
+            RuntimeError: If the request fails, times out, returns an error
+                status, or the response cannot be parsed.
+        """
         rows = model_inputs.to_dict(orient="records")
         feature_names = list(model_inputs.columns)
         data = [
@@ -193,10 +267,29 @@ class FraudDetectionService:
         return probability
 
     async def predict(self, inputs: FraudDetectionInputs) -> FraudDetectionOutputs:
+        """Run the full fraud scoring pipeline for a single transaction.
+
+        Fetches Redis history for the user-card pair, enriches and normalizes the
+        transaction, builds the model feature vector off the event loop, calls
+        KServe for a probability, persists a feature snapshot, publishes the
+        result to Kafka, and returns the structured prediction. Failures to save
+        the snapshot or publish to Kafka are logged but do not abort scoring.
+
+        Args:
+            inputs: The validated transaction to score.
+
+        Returns:
+            The transaction id, fraud probability and binary prediction.
+
+        Raises:
+            ValueError: If the transaction lacks ``user_id`` or ``card_id``.
+            RuntimeError: If building the model inputs or KServe inference fails.
+        """
         request_id = uuid4().hex
         predict_started_at = perf_counter()
 
         def log_time_perf(operation: str, started_at: float) -> None:
+            """Log the elapsed time of ``operation`` since ``started_at`` in milliseconds."""
             logger.debug(
                 "Fraud prediction operation timing",
                 extra={

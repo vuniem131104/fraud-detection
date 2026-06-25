@@ -1,7 +1,21 @@
+"""Pydantic request and response schemas for the fraud detection API.
+
+Defines the validated transaction payload accepted by the scoring endpoint
+(``FraudDetectionInputs``) and the structure of the scoring result returned to
+the caller (``FraudDetectionOutputs``).
+"""
+
 from pydantic import BaseModel, Field
 from typing import Literal
 
 class FraudDetectionInputs(BaseModel):
+    """Validated input schema for a single transaction to be scored.
+
+    Captures the raw transaction, card, device and IEEE-style count/time-delta/
+    match features (``C*``/``D*``/``M*``, accepted via their uppercase aliases)
+    used to build the model feature vector.
+    """
+
     tx_id: str = Field(min_length=1)
     event_timestamp: str = Field(min_length=1)
     amount_usd: float = Field(gt=0)
@@ -35,6 +49,12 @@ class FraudDetectionInputs(BaseModel):
     m6: str = Field(alias="M6", pattern=r"^[TF]$")
 
 class FraudDetectionOutputs(BaseModel):
+    """Scoring result for a single transaction.
+
+    Holds the transaction id, the predicted fraud probability and the binary
+    prediction derived from the configured decision threshold.
+    """
+
     tx_id: str
     probability: float
     prediction: int

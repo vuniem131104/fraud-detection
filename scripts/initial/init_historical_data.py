@@ -1,3 +1,21 @@
+"""Initialize the fraud-detection application schema and seed demo data in Postgres.
+
+This script (re)creates the ``application`` schema and its core tables
+(``users``, ``cards``, ``transactions``, ``prediction_logs``, ``feature_snapshots``,
+``labels``) and then populates them with deterministic, realistic demo data:
+
+* fake users with addresses derived from a fixed set of email domains,
+* payment cards distributed across countries/brands/types,
+* historical transactions consisting of a bulk of "normal" transactions plus a
+  small number of crafted anomalous transactions (high amount, foreign billing,
+  rooted/old device, throwaway recipient email) for selected aged cards.
+
+It can run in ``--schema-only`` mode to just (re)build the schema, or seed the
+full dataset. All seeded timestamps can be shifted into the past via ``--days-ago``.
+The module also contains helpers that build feature-style "history"/"anomaly"
+dictionaries used by downstream model tooling.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -176,20 +194,28 @@ ABNORMAL_BILLING = [
 
 
 def domains() -> list[str]:
+    """Return the list of email domains used to generate fake user addresses."""
     return [*EMAIL_BIN.keys(), *sorted(EMAIL_NULLS)]
 
 
 def local_now(days_ago: int = 0) -> datetime:
+    """Return the current Ho Chi Minh time, optionally shifted back by ``days_ago`` days."""
     return datetime.now(HO_CHI_MINH_TZ) - timedelta(days=days_ago)
 
 
 def to_local_time(value: datetime) -> datetime:
+    """Convert a datetime to the Ho Chi Minh timezone.
+
+    Naive datetimes are assumed to already be in Ho Chi Minh local time and are
+    simply tagged with that timezone; aware datetimes are converted.
+    """
     if value.tzinfo is None:
         return value.replace(tzinfo=HO_CHI_MINH_TZ)
     return value.astimezone(HO_CHI_MINH_TZ)
 
 
 def hash_password(password: str) -> str:
+    """Return the hex PBKDF2-HMAC-SHA256 hash of ``password`` using a fixed iteration count."""
     return hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
@@ -199,6 +225,20 @@ def hash_password(password: str) -> str:
 
 
 def fake_users(count: int, password: str, days_ago: int = 0) -> list[tuple[str, str, str, str, datetime]]:
+    """Build ``count`` fake user rows ready for insertion into ``application.users``.
+
+    Each user gets a deterministic name and email (cycling through the available
+    domains), the hashed ``password``, and a ``created_at`` staggered one minute
+    apart starting just before the (optionally shifted) current time.
+
+    Args:
+        count: Number of user rows to generate.
+        password: Plaintext password to hash for every user.
+        days_ago: Shift the effective "now" back by this many days.
+
+    Returns:
+        A list of ``(id, name, email, password_hash, created_at)`` tuples.
+    """
     available_domains = domains()
     base_time = local_now(days_ago).replace(microsecond=0) - timedelta(days=count)
     rows = []
@@ -227,6 +267,22 @@ async def seed_fake_users(
     replace: bool = False,
     days_ago: int = 0,
 ) -> tuple[int, int]:
+    """Insert fake users into Postgres, skipping existing emails.
+
+    Optionally deletes previously seeded fake users first (when ``replace`` is
+    true), then bulk-inserts freshly generated rows with ``ON CONFLICT DO NOTHING``.
+
+    Args:
+        database: Open Postgres database wrapper.
+        count: Number of fake users to generate.
+        password: Plaintext password to hash for every user.
+        replace: If true, delete existing fake users before inserting.
+        days_ago: Shift the effective "now" back by this many days.
+
+    Returns:
+        A tuple ``(newly_inserted, total_fake_users)`` counting the fake users
+        present after the operation.
+    """
     available_domains = domains()
     rows = fake_users(count, password, days_ago=days_ago)
 
@@ -278,10 +334,12 @@ async def seed_fake_users(
 
 
 def issuer_code(country: int, index: int) -> str:
+    """Build a synthetic card issuer code from a country and an index."""
     return f"ISS-{country}-{index % 97:02d}"
 
 
 def bin_code(brand: str, rng: random.Random) -> str:
+    """Generate a random BIN whose leading digit matches the card ``brand``."""
     if brand == "visa":
         return f"4{rng.randint(10000, 99999)}"
     if brand == "mastercard":
@@ -290,11 +348,13 @@ def bin_code(brand: str, rng: random.Random) -> str:
 
 
 def normal_amount_usd(rng: random.Random) -> float:
+    """Draw a realistic "normal" transaction amount in USD, clamped to ``[3, 350]``."""
     amount = rng.lognormvariate(3.35, 0.65)
     return round(min(max(amount, 3.0), 350.0), 2)
 
 
 def country_zone(country: int) -> int:
+    """Return the geographic zone for a numeric country code, defaulting to zone 1."""
     for country_code, zone in COUNTRIES:
         if country_code == country:
             return zone
@@ -302,6 +362,12 @@ def country_zone(country: int) -> int:
 
 
 def card_created_at(user_created_at: datetime, rng: random.Random, now: datetime) -> datetime:
+    """Pick a plausible card creation time after the owning user was created.
+
+    Most cards are aged 60-720 days; ~20% are recently created (1-30 days). The
+    result is always at least one day after ``user_created_at`` and no later than
+    ``now``.
+    """
     age_days = rng.randint(1, 30) if rng.random() < 0.2 else rng.randint(60, 720)
     target = now - timedelta(days=age_days, hours=rng.randint(0, 23))
     earliest = user_created_at + timedelta(days=1)
@@ -312,6 +378,12 @@ def card_created_at(user_created_at: datetime, rng: random.Random, now: datetime
 
 
 def transaction_created_at(card_created_at_value: datetime, rng: random.Random, now: datetime) -> datetime:
+    """Pick a plausible transaction time after the card was created.
+
+    Weights recency so ~70% of transactions fall within the last 29 days, ~25%
+    within 31-180 days, and ~5% within 181-540 days. The result is always at
+    least one hour after the card creation time and no later than ``now``.
+    """
     bucket = rng.random()
     if bucket < 0.7:
         age = timedelta(days=rng.randint(0, 29), seconds=rng.randint(0, 86_399))
@@ -329,6 +401,11 @@ def transaction_created_at(card_created_at_value: datetime, rng: random.Random, 
 
 
 def normal_billing(card_country: int, rng: random.Random) -> tuple[int, int]:
+    """Choose a billing ``(country, zone)`` for a normal transaction.
+
+    Usually returns the card's own country/zone, but ~6% of the time picks a
+    different country within the same zone to add mild geographic variation.
+    """
     zone = country_zone(card_country)
     if rng.random() >= 0.06:
         return card_country, zone
@@ -342,10 +419,16 @@ def normal_billing(card_country: int, rng: random.Random) -> tuple[int, int]:
 
 
 def numeric_uuid(identifier: str) -> int:
+    """Map a hex UUID string to a stable 32-bit-range integer."""
     return int(identifier, 16) % 2_147_483_647
 
 
 def card_device_profile(card_id: str, rng: random.Random) -> tuple[str, str, str, str]:
+    """Select a (device_type, os, browser, resolution) profile for a card.
+
+    The choice is mostly deterministic per card (derived from the card id) with a
+    small random jitter so a card occasionally appears on an adjacent profile.
+    """
     profile_index = (numeric_uuid(card_id) + rng.randint(0, 1)) % len(DEVICE_PROFILES)
     return DEVICE_PROFILES[profile_index]
 
@@ -358,6 +441,23 @@ async def seed_cards(
     replace: bool,
     days_ago: int = 0,
 ) -> tuple[int, int]:
+    """Seed payment cards for the existing fake users.
+
+    Distributes cards deterministically across countries, brands and types, only
+    inserting enough new cards to reach ``count`` total for the fake users.
+    When ``replace`` is true, existing transactions and cards for those users are
+    deleted first. Card creation times are constrained to follow the owning user.
+
+    Args:
+        database: Open Postgres database wrapper.
+        count: Target total number of cards across fake users.
+        seed: RNG seed for reproducible card generation.
+        replace: If true, delete existing cards/transactions for the users first.
+        days_ago: Shift the effective "now" back by this many days.
+
+    Returns:
+        A tuple ``(user_count, cards_inserted)``.
+    """
     rng = random.Random(seed)
     now = local_now(days_ago).replace(microsecond=0)
 
@@ -453,6 +553,12 @@ def transaction_row(
     screen_resolution: str,
     created_at: datetime,
 ) -> tuple:
+    """Assemble a transaction tuple in the column order used for bulk insertion.
+
+    Generates a fresh transaction id and copies the card's ``user_id``/``id`` along
+    with the supplied transaction attributes into the positional tuple expected by
+    :func:`insert_transaction_rows`.
+    """
     return (
         uuid4().hex,
         card["user_id"],
@@ -473,6 +579,7 @@ def transaction_row(
 
 
 async def insert_transaction_rows(conn: asyncpg.Connection, rows: list[tuple]) -> None:
+    """Bulk-insert transaction tuples into ``application.transactions`` (no-op if empty)."""
     if not rows:
         return
     await conn.executemany(
@@ -500,6 +607,33 @@ async def seed_transactions(
     replace: bool,
     days_ago: int = 0,
 ) -> tuple[int, int]:
+    """Seed historical transactions, including a small set of crafted anomalies.
+
+    Generates ``transaction_count`` total transactions for the fake users' cards:
+    ``transaction_count - anomaly_count`` normal transactions (with realistic
+    amounts, billing and device profiles) plus ``anomaly_count`` anomalous ones.
+    For each anomalous card it first inserts three "normal" history transactions
+    (at ~28/14/3 days ago) and then a single high-risk transaction (large amount,
+    foreign billing, rooted/old device, throwaway recipient email). Anomalous
+    cards are sampled only from cards older than 35 days.
+
+    Args:
+        database: Open Postgres database wrapper.
+        transaction_count: Total number of transactions to seed.
+        anomaly_count: Number of anomalous cards/transactions to craft.
+        seed: RNG seed for reproducible generation.
+        replace: If true, delete existing transactions for these cards first.
+        days_ago: Shift the effective "now" back by this many days.
+
+    Returns:
+        A tuple ``(normal_count, anomaly_count)``.
+
+    Raises:
+        ValueError: If ``anomaly_count`` is not strictly less than
+            ``transaction_count``, or if there is not enough room to keep at least
+            three normal history transactions per anomaly.
+        RuntimeError: If fewer than ``anomaly_count`` cards are older than 35 days.
+    """
     if anomaly_count >= transaction_count:
         raise ValueError("--anomaly-count must be lower than --transaction-count")
 
@@ -647,23 +781,41 @@ async def seed_transactions(
 
 
 def iso_local(dt: datetime) -> str:
+    """Return the ISO-8601 string of ``dt`` rendered in Ho Chi Minh local time."""
     return to_local_time(dt).isoformat()
 
 
 def email_domain(email: str) -> str:
+    """Return the lowercase domain part of an email address (or the whole value if no ``@``)."""
     return email.split("@", 1)[1].lower() if "@" in email else email.lower()
 
 
 def issuer_numeric(issuer_code_value: str) -> float:
+    """Extract the digits from an issuer code and return them as a float (0 if none)."""
     digits = "".join(ch for ch in str(issuer_code_value) if ch.isdigit())
     return float(digits or 0)
 
 
 def model_channel(channel: str | None) -> str:
+    """Map a stored channel name to its single-letter model code, defaulting to ``"W"``."""
     return CHANNEL_TO_MODEL.get(str(channel), "W")
 
 
 def history_row(tx: dict, card: dict, history_index: int) -> dict:
+    """Build a model-feature dictionary representing a normal "history" transaction.
+
+    Combines transaction and card fields into the flat feature schema (numeric
+    identifiers, normalized email domains, card-age/recency proxies, and benign
+    C/D/M feature values) used by downstream model tooling.
+
+    Args:
+        tx: Transaction row mapping.
+        card: Owning card row mapping.
+        history_index: Sequence index used to populate the ``C13`` count feature.
+
+    Returns:
+        A dict of feature name to value for one normal transaction.
+    """
     card_age_days = max((tx["created_at"].date() - card["card_created_at"].date()).days, 0)
     return {
         "tx_id": numeric_uuid(tx["id"]),
@@ -722,6 +874,20 @@ def history_row(tx: dict, card: dict, history_index: int) -> dict:
 
 
 def anomaly_row(tx: dict, card: dict, history_count: int) -> dict:
+    """Build a model-feature dictionary representing an anomalous transaction.
+
+    Mirrors :func:`history_row` but uses the actual time since the card's last
+    transaction for the recency feature and emits inflated/high-risk C/D/M
+    feature values characteristic of fraudulent activity.
+
+    Args:
+        tx: Transaction row mapping.
+        card: Owning card row mapping (expects ``last_tx_at`` and ``card_created_at``).
+        history_count: Prior transaction count used to derive the ``C13`` feature.
+
+    Returns:
+        A dict of feature name to value for one anomalous transaction.
+    """
     last_tx_at = card["last_tx_at"] or card["card_created_at"]
     card_age_days = max((tx["created_at"].date() - card["card_created_at"].date()).days, 0)
     days_since_last_tx = max((tx["created_at"] - last_tx_at).total_seconds() / 86400, 0.0)
@@ -782,10 +948,12 @@ def anomaly_row(tx: dict, card: dict, history_count: int) -> dict:
 
 
 async def init_application_schema(database: PostgresDatabase) -> None:
+    """Execute the DDL that (re)creates the ``application`` schema and its tables."""
     await database.execute(APPLICATION_DDL)
 
 
 async def run_init_db() -> int:
+    """Initialize only the Postgres ``application`` schema and return an exit code."""
     database = PostgresDatabase.from_env()
     await database.open()
     try:
@@ -797,6 +965,20 @@ async def run_init_db() -> int:
 
 
 async def run_all(args: argparse.Namespace) -> int:
+    """Run the full pipeline: build schema, then seed users, cards and transactions.
+
+    Validates the count arguments, opens a Postgres connection, and runs each
+    seeding step in turn while printing progress summaries.
+
+    Args:
+        args: Parsed CLI arguments controlling counts, seeds, password and day shift.
+
+    Returns:
+        Process exit code (0 on success).
+
+    Raises:
+        ValueError: If any of the count arguments is not greater than 0.
+    """
     if args.user_count <= 0:
         raise ValueError("--user-count must be greater than 0")
     if args.card_count <= 0:
@@ -853,6 +1035,7 @@ async def run_all(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the historical-data initialization CLI."""
     parser = argparse.ArgumentParser(
         description=(
             "Initialize the application schema, seed fake users, seed cards, "
@@ -877,6 +1060,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def main_async() -> int:
+    """Parse CLI arguments and dispatch to schema-only or full seeding, returning an exit code."""
     args = build_parser().parse_args()
     if args.schema_only:
         return await run_init_db()
@@ -884,6 +1068,7 @@ async def main_async() -> int:
 
 
 def main() -> int:
+    """Synchronous entry point that runs :func:`main_async` via ``asyncio.run``."""
     return asyncio.run(main_async())
 
 
