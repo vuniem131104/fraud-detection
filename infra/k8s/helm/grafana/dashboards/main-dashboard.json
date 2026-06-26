@@ -164,7 +164,7 @@
             "uid": "PostgreSQL"
           },
           "rawQuery": true,
-          "rawSql": "SELECT percentile_cont(0.90) WITHIN GROUP (ORDER BY latency) AS p90, percentile_cont(0.95) WITHIN GROUP (ORDER BY latency) AS p95, percentile_cont(0.99) WITHIN GROUP (ORDER BY latency) AS p99 FROM application.transactions WHERE $__timeFilter(created_at);",
+          "rawSql": "SELECT percentile_cont(0.90) WITHIN GROUP (ORDER BY latency_ms) AS p90, percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95, percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_ms) AS p99 FROM application.prediction_logs WHERE $__timeFilter(created_at);",
           "format": "table",
           "refId": "A"
         }
@@ -233,7 +233,7 @@
             "uid": "PostgreSQL"
           },
           "rawQuery": true,
-          "rawSql": "SELECT now() AS time, CASE WHEN COUNT(*) = 0 THEN 0 ELSE COUNT(*) FILTER (WHERE status = 'review')::double precision * 100 / COUNT(*) END AS review_rate FROM application.transactions WHERE $__timeFilter(created_at);",
+          "rawSql": "SELECT now() AS time, CASE WHEN COUNT(*) = 0 THEN 0 ELSE COUNT(*) FILTER (WHERE prediction = 1)::double precision * 100 / COUNT(*) END AS review_rate FROM application.prediction_logs WHERE $__timeFilter(created_at);",
           "format": "time_series",
           "refId": "A"
         }

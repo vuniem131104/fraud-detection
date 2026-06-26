@@ -40,7 +40,7 @@ serviceAccount:
   labels: {}
   ## Service account annotations. Can be templated.
   annotations:
-    iam.gke.io/gcp-service-account: gar-cloud-sql-access-sa@project-8f21156c-3434-4d17-a8c.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: grafana-sa@project-8f21156c-3434-4d17-a8c.iam.gserviceaccount.com
 
   ## autoMount is deprecated in favor of automountServiceAccountToken
   # autoMount: false
@@ -395,7 +395,7 @@ extraInitContainers: []
 ## Enable an Specify container in extraContainers. This is meant to allow adding an authentication proxy to a grafana pod
 extraContainers: |
   - name: cloud-sql-proxy
-    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.8.0
+    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.22.1
     args:
       - "--structured-logs"
       - "--auto-iam-authn"
@@ -677,14 +677,14 @@ datasources:
   datasources.yaml:
     apiVersion: 1
     datasources:
-    - name: Prometheus
-      type: prometheus
-      url: http://prometheus-server.aide-monitoring.svc.cluster.local
-      access: proxy
-      isDefault: true
-      editable: true
-      jsonData:
-        timeInterval: 15s
+    # - name: Prometheus
+    #   type: prometheus
+    #   url: http://prometheus-server.aide-monitoring.svc.cluster.local
+    #   access: proxy
+    #   isDefault: true
+    #   editable: true
+    #   jsonData:
+    #     timeInterval: 15s
     - name: PostgreSQL
       type: postgres
       url: ${GRAFANA_PG_HOST}:${GF_PG_PORT}
@@ -715,31 +715,31 @@ datasources:
             matcherRegex: "\"traceID\":\\s*\"(\\w+)\""
             name: TraceID
             url: "{ trace:id = \"$${__value.raw}\" }"
-    - name: Tempo
-      type: tempo
-      uid: tempo
-      url: http://tempo.aide-monitoring.svc.cluster.local:3200
-      access: proxy
-      isDefault: false
-      editable: true
-      jsonData:
-        httpMethod: GET
-        serviceMap:
-          datasourceUid: prometheus
-        nodeGraph:
-          enabled: true
-        search:
-          hide: false
-        lokiSearch:
-          datasourceUid: loki
-        tracesToLogsV2:
-          datasourceUid: loki
-          spanStartTimeShift: "-1m"
-          spanEndTimeShift: "1m"
-          filterByTraceID: true
-          filterBySpanID: false
-        tracesToMetrics:
-          datasourceUid: prometheus
+    # - name: Tempo
+    #   type: tempo
+    #   uid: tempo
+    #   url: http://tempo.aide-monitoring.svc.cluster.local:3200
+    #   access: proxy
+    #   isDefault: false
+    #   editable: true
+    #   jsonData:
+    #     httpMethod: GET
+    #     serviceMap:
+    #       datasourceUid: prometheus
+    #     nodeGraph:
+    #       enabled: true
+    #     search:
+    #       hide: false
+    #     lokiSearch:
+    #       datasourceUid: loki
+    #     tracesToLogsV2:
+    #       datasourceUid: loki
+    #       spanStartTimeShift: "-1m"
+    #       spanEndTimeShift: "1m"
+    #       filterByTraceID: true
+    #       filterBySpanID: false
+    #     tracesToMetrics:
+    #       datasourceUid: prometheus
 
 ## Configure grafana alerting (can be templated)
 ## ref: https://docs.grafana.com/alerting/set-up/provision-alerting-resources/file-provisioning/
@@ -893,25 +893,23 @@ dashboards:
   #   some-dashboard:
   #     json: |
   #       $RAW_JSON
-    model-predictions-dashboard:
-      file: dashboards/model-predictions-dashboard.json
-    accumulated-requests-dashboard:
-      file: dashboards/accumulated-requests-dashboard.json
+    main-dashboard:
+      file: dashboards/main-dashboard.json
     # Prometheus 2.0 Overview — health/perf of the Prometheus server itself
-    prometheus-stats:
-      gnetId: 3662
-      revision: 2
-      datasource: Prometheus
-    # Kubernetes Deployments / Pods via kube-state-metrics
-    kubernetes-deployments:
-      gnetId: 8588
-      revision: 1
-      datasource: Prometheus
-    # Kubernetes kube-state-metrics — namespace/pod/container status
-    kubernetes-kube-state-metrics:
-      gnetId: 13332
-      revision: 12
-      datasource: Prometheus
+    # prometheus-stats:
+    #   gnetId: 3662
+    #   revision: 2
+    #   datasource: Prometheus
+    # # Kubernetes Deployments / Pods via kube-state-metrics
+    # kubernetes-deployments:
+    #   gnetId: 8588
+    #   revision: 1
+    #   datasource: Prometheus
+    # # Kubernetes kube-state-metrics — namespace/pod/container status
+    # kubernetes-kube-state-metrics:
+    #   gnetId: 13332
+    #   revision: 12
+    #   datasource: Prometheus
   #   local-dashboard:
   #     url: https://example.com/repository/test.json
   #     curlOptions: "-sLf"

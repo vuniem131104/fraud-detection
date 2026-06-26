@@ -1,93 +1,142 @@
-"""CLI utility to inspect the Redis-cached transactions and features for a user/card pair."""
+"""
+test_api.py – gửi giao dịch bình thường tới fraud-detection API.
 
-from redis import asyncio as aioredis
+Usage:
+    # 1 giao dịch (1 user + card):
+    python3 test.py <user_id>:<card_id>
+
+    # Bắn N request CÙNG LÚC, chia đều cho các cặp user_id:card_id (test autoscaling):
+    python3 test.py u1:c1 u2:c2 u3:c3 u4:c4 u5:c5 -n 50
+"""
+
 import argparse
 import asyncio
 import json
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+import httpx
+
+API_URL = "http://localhost:1311/score"
+HO_CHI_MINH_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
 
 
-key_transactions = "user:card:transactions:{user_id}_{card_id}"
-key_features = "user:card:features:{user_id}_{card_id}"
-
-
-def decode_redis_value(value: Any) -> Any:
-    """Decode a raw Redis value from bytes to str, passing through non-bytes values."""
-    if isinstance(value, bytes):
-        return value.decode()
-
-    return value
-
-
-def decode_features(values: dict[Any, Any]) -> dict[str, Any]:
-    """Decode a Redis feature hash, coercing known feature keys to their numeric types."""
-    feature_types = {
-        "no_transactions_30_days": int,
-        "card_age_days": float,
-        "no_days_since_last_txn": float,
-    }
-    decoded_features = {}
-    for key, value in values.items():
-        decoded_key = str(decode_redis_value(key))
-        decoded_value = decode_redis_value(value)
-        value_type = feature_types.get(decoded_key)
-        if value_type is not None:
-            decoded_value = value_type(decoded_value)
-        decoded_features[decoded_key] = decoded_value
-    return decoded_features
-
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for the user/card lookup, including Redis connection options."""
-    parser = argparse.ArgumentParser(description="Get transactions and features for a user card.")
-    parser.add_argument("user_id")
-    parser.add_argument("card_id")
-    parser.add_argument("--host", default="localhost")
-    parser.add_argument("--port", type=int, default=6379)
-    parser.add_argument("--db", type=int, default=0)
+    parser = argparse.ArgumentParser(
+        description="Test the fraud-detection API.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "pairs",
+        nargs="+",
+        metavar="user_id:card_id",
+        help="Một hoặc nhiều cặp user_id:card_id.",
+    )
+    parser.add_argument(
+        "-n",
+        "--num",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Số request bắn cùng lúc, chia đều cho các cặp (mặc định 1).",
+    )
     return parser.parse_args()
 
 
-async def get_card_data(
-    redis_client: aioredis.Redis,
-    user_id: str,
-    card_id: str,
-) -> dict:
-    """Fetch and decode the cached transactions and features for a user/card pair from Redis."""
-    transactions_key = key_transactions.format(user_id=user_id, card_id=card_id)
-    features_key = key_features.format(user_id=user_id, card_id=card_id)
+def parse_pairs(raw_pairs: list[str]) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for raw in raw_pairs:
+        user_id, _, card_id = raw.partition(":")
+        if not user_id or not card_id:
+            raise SystemExit(f"Cặp không hợp lệ: {raw!r} (định dạng đúng: user_id:card_id)")
+        pairs.append((user_id, card_id))
+    return pairs
 
-    pipeline = redis_client.pipeline(transaction=False)
-    pipeline.zrevrange(transactions_key, 0, -1)
-    pipeline.hgetall(features_key)
-    transactions_raw, features_raw = await pipeline.execute()
-    features = decode_features(features_raw)
 
+def build_normal_payload(user_id: str, card_id: str) -> dict:
     return {
-        "user_id": user_id,
-        "card_id": card_id,
-        "features": features,
-        "transactions": [json.loads(transaction) for transaction in transactions_raw],
+        "tx_id":             uuid4().hex,
+        "user_id":           user_id,
+        "card_id":           card_id,
+        "event_timestamp":   datetime.now(HO_CHI_MINH_TZ).replace(microsecond=0).isoformat(),
+        "amount_usd":        50.0,
+        "channel":           "W",
+        "card_country":      840,
+        "issuer_code":       84001,
+        "card_brand":        "visa",
+        "bin_code":          "411111",
+        "card_type":         "credit",
+        "billing_zone":      1,
+        "billing_country":   840,
+        "email_purchaser":   "buyer@gmail.com",
+        "email_recipient":   "seller@gmail.com",
+        "device_type":       "desktop",
+        "device_info":       "desktop:Windows 11:Chrome",
+        "os_raw":            "Windows 11",
+        "browser_raw":       "Chrome",
+        "screen_resolution": "1920x1080",
+        "C1":  5,
+        "C2":  2,
+        "C13": 10,
+        "M1":  "T",
+        "M2":  "T",
+        "M6":  "F",
+        "D4":  3.0,
+        "D15": 7.0,
     }
 
 
-async def main() -> None:
-    """Connect to Redis, retrieve the card data for the given user/card, and print it as JSON."""
-    args = parse_args()
-    redis_client = aioredis.Redis(
-        host=args.host,
-        port=args.port,
-        db=args.db,
-        decode_responses=True,
-    )
-    
-    try:
-        data = await get_card_data(redis_client, args.user_id, args.card_id)
-    finally:
-        await redis_client.aclose()
+async def send_one(client: httpx.AsyncClient, user_id: str, card_id: str) -> dict:
+    response = await client.post(API_URL, json=build_normal_payload(user_id, card_id))
+    response.raise_for_status()
+    return response.json()
 
-    print(json.dumps(data, indent=2))
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+async def run() -> int:
+    args = parse_args()
+    pairs = parse_pairs(args.pairs)
+
+    # ── 1 request: 1 user + card, in đầy đủ payload + response ────────────
+    if args.num <= 1 and len(pairs) == 1:
+        user_id, card_id = pairs[0]
+        payload = build_normal_payload(user_id, card_id)
+        print(f"POST {API_URL}")
+        print(json.dumps(payload, indent=2))
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(API_URL, json=payload)
+            response.raise_for_status()
+            print("\nResponse:")
+            print(json.dumps(response.json(), indent=2))
+        return 0
+
+    # ── Bắn N request cùng lúc, round-robin các cặp ───────────────────────
+    print(f"Bắn {args.num} request cùng lúc, chia đều cho {len(pairs)} cặp → {API_URL}")
+    limits = httpx.Limits(max_connections=min(args.num, 200), max_keepalive_connections=50)
+    async with httpx.AsyncClient(timeout=30.0, limits=limits) as client:
+        tasks = [
+            send_one(client, *pairs[i % len(pairs)])
+            for i in range(args.num)
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    n_ok = sum(1 for r in results if not isinstance(r, Exception))
+    n_err = args.num - n_ok
+    print(f"\nKết quả: ok={n_ok} err={n_err}")
+    first_err = next((r for r in results if isinstance(r, Exception)), None)
+    if first_err is not None:
+        print(f"  ví dụ lỗi: {first_err!r}")
+    return 1 if n_ok == 0 else 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(run()))
