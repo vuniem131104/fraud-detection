@@ -6,7 +6,6 @@ metadata:
   labels:
     app: {{ .Values.predictionWriter.name }}
 spec:
-  replicas: {{ .Values.predictionWriter.replicaCount }}
   selector:
     matchLabels:
       app: {{ .Values.predictionWriter.name }}

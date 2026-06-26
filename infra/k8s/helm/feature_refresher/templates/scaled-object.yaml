@@ -1,0 +1,24 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: feature-refresher
+  namespace: core
+spec:
+  scaleTargetRef:
+    name: feature-refresher
+  pollingInterval: 30
+  cooldownPeriod: 120
+  minReplicaCount: 0
+  maxReplicaCount: 2
+  triggers:
+  - type: kafka
+    metadata:
+      bootstrapServers: fraud-detection-niemhoalongvu-8584.e.aivencloud.com:17550
+      consumerGroup: features-refresher
+      topic: predictions
+      lagThreshold: "3"
+      activationLagThreshold: "0"
+      offsetResetPolicy: earliest
+      tls: enable
+    authenticationRef:
+      name: keda-kafka-feature-refresher
