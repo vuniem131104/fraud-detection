@@ -8,7 +8,9 @@ metadata:
 spec:
   replicas: {{ .Values.api.replicaCount }}
   strategy:
-    {{- toYaml .Values.api.strategy | nindent 4 }}
+    type: {{ .Values.api.strategy.type }}
+    rollingUpdate:
+      {{- toYaml .Values.api.strategy.params | nindent 6 }}
   selector:
     matchLabels:
       app: {{ .Values.api.name }}
