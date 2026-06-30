@@ -34,7 +34,7 @@ rbac:
   #   verbs: []
 serviceAccount:
   create: true
-  name:
+  name: grafana-sa
   nameTest:
   ## ServiceAccount labels.
   labels: {}
@@ -257,7 +257,7 @@ serviceMonitor:
   ##
   enabled: false
   path: /metrics
-  namespace: aide-monitoring
+  namespace: monitoring
   labels: {}
   interval: 30s
   scheme: http
@@ -679,7 +679,7 @@ datasources:
     datasources:
     # - name: Prometheus
     #   type: prometheus
-    #   url: http://prometheus-server.aide-monitoring.svc.cluster.local
+    #   url: http://prometheus-server.monitoring.svc.cluster.local
     #   access: proxy
     #   isDefault: true
     #   editable: true
@@ -704,7 +704,7 @@ datasources:
     - name: Loki
       type: loki
       uid: loki
-      url: http://loki.aide-monitoring.svc.cluster.local:3100
+      url: http://loki.monitoring.svc.cluster.local:3100
       access: proxy
       isDefault: false
       editable: true
@@ -718,7 +718,7 @@ datasources:
     # - name: Tempo
     #   type: tempo
     #   uid: tempo
-    #   url: http://tempo.aide-monitoring.svc.cluster.local:3200
+    #   url: http://tempo.monitoring.svc.cluster.local:3200
     #   access: proxy
     #   isDefault: false
     #   editable: true
