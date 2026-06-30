@@ -17,7 +17,8 @@ RUN pip install --no-cache-dir \
     "pandas==2.3.3" \
     "redis==7.4.0" \
     "structlog==25.5.0" \
-    "uvicorn==0.38.0"
+    "uvicorn==0.38.0" \
+    "gunicorn==23.0.0"
 
 COPY src/database ./src/database
 COPY src/fraud_detection ./src/fraud_detection
@@ -25,4 +26,4 @@ COPY models/feature_schema.json ./models/feature_schema.json
 
 EXPOSE 1311
 
-CMD ["sh", "-c", "exec uvicorn fraud_detection.core.api:app --host 0.0.0.0 --port 1311 --workers \"${FRAUD_DETECTION_API_WORKERS:-5}\" --no-access-log"]
+CMD ["sh", "-c", "exec gunicorn fraud_detection.core.api:app -k uvicorn.workers.UvicornWorker --workers \"${FRAUD_DETECTION_API_WORKERS:-5}\" --bind 0.0.0.0:1311 --preload --access-logfile -"]

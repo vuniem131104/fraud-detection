@@ -1,0 +1,11 @@
+{
+  "val_roc_auc": 0.9419612291245854,
+  "val_pr_auc": 0.6271715563759425,
+  "val_precision_at_1pct": 0.9005649717514125,
+  "best_iteration": 317,
+  "n_features": 250,
+  "n_train_phase_a": 501959,
+  "scale_pos_weight": 27.552844141069396,
+  "phase_b_n_rounds": 348,
+  "n_train_phase_b": 590540
+}

@@ -27,17 +27,19 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.155.7",
     "locust==2.44.0",
+    "mutmut>=3.6.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-ra --strict-markers"
+addopts = "-ra"
 filterwarnings = [
     "ignore:.*HTTP_422_UNPROCESSABLE_ENTITY.*:DeprecationWarning",
 ]
@@ -56,3 +58,12 @@ exclude_lines = [
     "raise NotImplementedError",
     "\\.\\.\\.",
 ]
+
+[tool.mutmut]
+# Mutate only the recently-changed code files (not the whole codebase per commit)
+source_paths = [
+    "src/fraud_detection/core/utils.py",
+    "src/fraud_detection/core/api.py",
+]
+runner = "python -m pytest tests/ --ignore=tests/locust_load_test.py -x -q --tb=no --no-header"
+pytest_add_cli_args_test_selection = ["tests/"]

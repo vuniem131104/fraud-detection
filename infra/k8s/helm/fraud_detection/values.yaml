@@ -2,9 +2,12 @@ namespace: core
 
 api:
   name: fraud-detection-api
-  replicaCount: 1
+  replicaCount: 2
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    params:
+      maxUnavailable: 1
+      maxSurge: 1
   image:
     repository: us-central1-docker.pkg.dev/project-8f21156c-3434-4d17-a8c/fraud-detection/fraud-detection-api
     tag: "latest"
@@ -12,7 +15,7 @@ api:
   port: 1311
   resources:
     requests:
-      cpu: "250m"
+      cpu: "500m"
       memory: "1Gi"
     limits:
       cpu: "1500m"
@@ -23,11 +26,11 @@ cloudSqlProxy:
   port: 5432
   resources:
     requests:
-      cpu: "250m"
-      memory: "256Mi"
+      cpu: "128m"
+      memory: "128Mi"
     limits:
-      cpu: "500m"
-      memory: "1Gi"
+      cpu: "256m"
+      memory: "256Mi"
 
 serviceAccount:
   name: fraud-detection-api-sa

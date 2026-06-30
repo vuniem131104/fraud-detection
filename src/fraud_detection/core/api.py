@@ -41,6 +41,10 @@ structlog.configure(
     )
 )
 
+_schema_path = DEFAULT_MODEL_DIR / "feature_schema.json"
+with _schema_path.open() as f:
+    _FEATURE_SCHEMA = json.load(f)
+
 
 class CreateUserPayload(BaseModel):
     """Request body fields describing a user to be created."""
@@ -150,16 +154,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     redis_client = aioredis.Redis(connection_pool=redis_pool)
     fraud_detection_service: FraudDetectionService | None = None
 
-    schema_path = DEFAULT_MODEL_DIR / "feature_schema.json"
-    with schema_path.open() as schema_file:
-        schema = json.load(schema_file)
-
     try:
         feature_store = RedisFeatureStore(redis_client)
         app.state.database = database
         app.state.redis_client = redis_client
         fraud_detection_service = FraudDetectionService(
-            schema=schema,
+            schema=_FEATURE_SCHEMA,
             feature_store=feature_store,
             database=database,
             threshold=0.5,
