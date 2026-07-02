@@ -1,3 +1,26 @@
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.10.5
+  env_file:
+    - ../../.env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    TZ: Asia/Ho_Chi_Minh
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+  volumes:
+    - ../../airflow/dags:/opt/airflow/dags
+    - ../../airflow/logs:/opt/airflow/logs
+    - ../../airflow/plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    airflow-postgres:
+      condition: service_healthy
+
 services:
 
   # mlflow:
@@ -23,53 +46,125 @@ services:
   #     --backend-store-uri postgresql://$$POSTGRES_USER:$$POSTGRES_PASSWORD@$$POSTGRES_HOST:$$POSTGRES_PORT/$$POSTGRES_DB
   #     --default-artifact-root $$MLFLOW_ARTIFACT_ROOT"
 
-  redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:v26.1.9
-    command:
-      - redpanda
-      - start
-      - --smp
-      - "1"
-      - --overprovisioned
-      - --node-id
-      - "0"
-      - --kafka-addr
-      - PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
-      - --advertise-kafka-addr
-      - PLAINTEXT://redpanda:29092,OUTSIDE://172.21.0.1:9092
-      - --pandaproxy-addr
-      - 0.0.0.0:8082
-      - --advertise-pandaproxy-addr
-      - localhost:8082
-    ports:
-      - 8081:8081
-      - 8082:8082
-      - 9092:9092
-      - 29092:29092
-    healthcheck:
-      test: ["CMD-SHELL", "rpk cluster info -X brokers=127.0.0.1:29092 >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8081/subjects >/dev/null"]
-      interval: 10s
-      timeout: 6s
-      retries: 10
+  # redpanda:
+  #   image: docker.redpanda.com/redpandadata/redpanda:v26.1.9
+  #   command:
+  #     - redpanda
+  #     - start
+  #     - --smp
+  #     - "1"
+  #     - --overprovisioned
+  #     - --node-id
+  #     - "0"
+  #     - --kafka-addr
+  #     - PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+  #     - --advertise-kafka-addr
+  #     - PLAINTEXT://redpanda:29092,OUTSIDE://172.21.0.1:9092
+  #     - --pandaproxy-addr
+  #     - 0.0.0.0:8082
+  #     - --advertise-pandaproxy-addr
+  #     - localhost:8082
+  #   ports:
+  #     - 8081:8081
+  #     - 8082:8082
+  #     - 9092:9092
+  #     - 29092:29092
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "rpk cluster info -X brokers=127.0.0.1:29092 >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8081/subjects >/dev/null"]
+  #     interval: 10s
+  #     timeout: 6s
+  #     retries: 10
 
-  console:
-    image: docker.redpanda.com/redpandadata/console:v2.8.13
-    restart: on-failure
-    entrypoint: /bin/sh
-    command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml; /app/console"
-    environment:
-      CONFIG_FILEPATH: /tmp/config.yml
-      CONSOLE_CONFIG_FILE: |
-        kafka:
-          brokers: ["redpanda:29092"]
-          schemaRegistry:
-            enabled: true
-            urls: ["http://redpanda:8081"]
-    ports:
-      - "8090:8080"
-    depends_on:
-      redpanda:
-        condition: service_healthy
+  # console:
+  #   image: docker.redpanda.com/redpandadata/console:v2.8.13
+  #   restart: on-failure
+  #   entrypoint: /bin/sh
+  #   command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml; /app/console"
+  #   environment:
+  #     CONFIG_FILEPATH: /tmp/config.yml
+  #     CONSOLE_CONFIG_FILE: |
+  #       kafka:
+  #         brokers: ["redpanda:29092"]
+  #         schemaRegistry:
+  #           enabled: true
+  #           urls: ["http://redpanda:8081"]
+  #   ports:
+  #     - "8090:8080"
+  #   depends_on:
+  #     redpanda:
+  #       condition: service_healthy
+
+  # fraud-detection-api:
+  #   build:
+  #     context: ../..
+  #     dockerfile: infra/docker/Dockerfile.fraudDetection
+  #   env_file:
+  #     - ../../.env
+  #   ports:
+  #     - "1311:1311"
+  #   volumes:
+  #     - ../../certs:/app/certs:ro
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     lgbserver:
+  #       condition: service_started
+  #     # redpanda:
+  #       # condition: service_healthy
+  #   restart: unless-stopped
+
+  # prediction-writer:
+  #   build:
+  #     context: ../..
+  #     dockerfile: infra/docker/Dockerfile.predictionWriter
+  #   env_file:
+  #     - ../../.env
+  #   volumes:
+  #     - ../../certs:/app/certs:ro
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redpanda:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+
+  # feature-refresher:
+  #   build:
+  #     context: ../..
+  #     dockerfile: infra/docker/Dockerfile.featureRefresher
+  #   env_file:
+  #     - ../../.env
+  #   volumes:
+  #     - ../../certs:/app/certs:ro
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #     redpanda:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+
+  # lgbserver:
+  #   image: kserve/lgbserver:latest
+  #   container_name: lightgbm-lgbserver
+  #   env_file:
+  #     - ../../.env
+  #   ports:
+  #     - "8085:9080"
+  #   volumes:
+  #     - ../../models:/mnt/models:ro
+  #   command:
+  #     - --model_dir
+  #     - /mnt/models
+  #     - --model_name
+  #     - fraud-detection
+  #     - --http_port
+  #     - "9080"
+  #     - --workers
+  #     - "${KSERVE_WORKERS:-5}"
+  #     - --nthread
+  #     - "${KSERVE_THREADS_PER_WORKER:-1}"
 
   postgres:
     image: postgres:16
@@ -88,27 +183,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # grafana:
-  #   image: grafana/grafana:12.3.1
-  #   env_file:
-  #     - ../../.env
-  #   environment:
-  #     GF_AUTH_ANONYMOUS_ENABLED: "true"
-  #     GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
-  #     GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/accumulated-requests-dashboard.json
-  #     POSTGRES_HOST: postgres
-  #     POSTGRES_PORT: "5432"
-  #   ports:
-  #     - "3000:3000"
-  #   volumes:
-  #     - ./grafana/provisioning:/etc/grafana/provisioning:ro
-  #     - ../k8s/helm/grafana/dashboards/accumulated-requests-dashboard.json:/etc/grafana/dashboards/accumulated-requests-dashboard.json:ro
-  #     - grafana-data:/var/lib/grafana
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   restart: unless-stopped
-
   redis:
     image: redis:7.2-alpine
     environment:
@@ -125,79 +199,69 @@ services:
       retries: 5
     restart: unless-stopped
 
-  fraud-detection-api:
-    build:
-      context: ../..
-      dockerfile: infra/docker/Dockerfile.fraudDetection
-    env_file:
-      - ../../.env
-    ports:
-      - "1311:1311"
+  airflow-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+      TZ: Asia/Ho_Chi_Minh
+      PGTZ: Asia/Ho_Chi_Minh
     volumes:
-      - ../../certs:/app/certs:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      lgbserver:
-        condition: service_started
-      # redpanda:
-        # condition: service_healthy
+      - airflow-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
-  prediction-writer:
-    build:
-      context: ../..
-      dockerfile: infra/docker/Dockerfile.predictionWriter
-    env_file:
-      - ../../.env
-    volumes:
-      - ../../certs:/app/certs:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redpanda:
-        condition: service_healthy
-    restart: unless-stopped
-
-  feature-refresher:
-    build:
-      context: ../..
-      dockerfile: infra/docker/Dockerfile.featureRefresher
-    env_file:
-      - ../../.env
-    volumes:
-      - ../../certs:/app/certs:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-      redpanda:
-        condition: service_healthy
-    restart: unless-stopped
-
-  lgbserver:
-    image: kserve/lgbserver:latest
-    container_name: lightgbm-lgbserver
-    env_file:
-      - ../../.env
-    ports:
-      - "8085:9080"
-    volumes:
-      - ../../models:/mnt/models:ro
+  airflow-init:
+    <<: *airflow-common
     command:
-      - --model_dir
-      - /mnt/models
-      - --model_name
-      - fraud-detection
-      - --http_port
-      - "9080"
-      - --workers
-      - "${KSERVE_WORKERS:-5}"
-      - --nthread
-      - "${KSERVE_THREADS_PER_WORKER:-1}"
+      - bash
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USER:-airflow}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD:-airflow}" \
+          --firstname Admin --lastname User --role Admin \
+          --email admin@example.com || true
+    restart: on-failure
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8090:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
 volumes:
   pgdata:
   redis-data:
+  airflow-pgdata:
   # grafana-data:
