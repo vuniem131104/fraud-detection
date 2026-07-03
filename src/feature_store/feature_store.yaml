@@ -10,10 +10,11 @@ offline_store:
   type: postgres
   host: localhost
   port: 5432
-  database: fraud_detection
+  database: fraud-detection
   db_schema: application
   user: vuniem
   password: vuniem131104
+  sslmode: disable
 
 online_store:
   type: redis

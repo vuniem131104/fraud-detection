@@ -3,6 +3,7 @@ x-airflow-common: &airflow-common
   env_file:
     - ../../.env
   environment: &airflow-common-env
+    POSTGRES_HOST: postgres
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
@@ -11,9 +12,11 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
     TZ: Asia/Ho_Chi_Minh
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-psycopg[binary]}
+    PYTHONPATH: /opt/airflow/code
   volumes:
     - ../../airflow/dags:/opt/airflow/dags
+    - ../../airflow/etl:/opt/airflow/code/etl
     - ../../airflow/logs:/opt/airflow/logs
     - ../../airflow/plugins:/opt/airflow/plugins
   user: "${AIRFLOW_UID:-50000}:0"

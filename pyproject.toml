@@ -23,11 +23,13 @@ dependencies = [
     "confluent-kafka>=2.14.2",
     "feast>=0.63.0",
     "psycopg[binary,pool]==3.3.4",
-    "apache-airflow==3.0.*",
-    "apache-airflow-providers-postgres>=6.8.0",
-    "apache-airflow-providers-common-sql>=2.0.1",
-    "sqlalchemy>=1.4.54",
+    "sqlalchemy>=2.0",
 ]
+# NOTE: Airflow runs in its own Docker container (apache/airflow image), NOT in
+# this venv. It is intentionally kept out of this project entirely because
+# apache-airflow-core pins sqlalchemy<2.0, which would block the psycopg v3
+# SQLAlchemy dialect (postgresql+psycopg) used by the Feast SQL registry.
+# For local DAG authoring, build a SEPARATE venv from airflow/requirements-dev.txt.
 
 [dependency-groups]
 dev = [
