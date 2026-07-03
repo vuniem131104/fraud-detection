@@ -8,7 +8,6 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
     AIRFLOW__CORE__FERNET_KEY: ""
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
     TZ: Asia/Ho_Chi_Minh
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-psycopg[binary]}
@@ -20,203 +19,45 @@ x-airflow-common: &airflow-common
     - ../../airflow/plugins:/opt/airflow/plugins
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends-on
-    airflow-postgres:
+    cloud-sql-proxy:
       condition: service_healthy
 
 services:
+
+  cloud-sql-proxy:
+    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1-alpine
+    restart: unless-stopped
+    command:
+      - "--address=0.0.0.0"
+      - "--port=5432"
+      - "--health-check"
+      - "--http-address=0.0.0.0"
+      - "--http-port=9090"
+      - "${CLOUDSQL_CONNECTION_NAME}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:9090/readiness >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
 
   # mlflow:
   #   image: ghcr.io/mlflow/mlflow:v3.12.0
   #   env_file:
   #     - ../../.env
-  #   environment:
-  #     POSTGRES_HOST: 127.0.0.1
-  #     POSTGRES_PORT: "5433"
-  #     GOOGLE_APPLICATION_CREDENTIALS: /root/.config/gcloud/application_default_credentials.json
-  #   network_mode: host
-  #   volumes:
-  #     - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
+  #   ports:
+  #     - "5000:5000"
   #   command: >
   #     sh -c "pip install -q psycopg2-binary google-cloud-storage &&
-  #     export GOOGLE_CLOUD_PROJECT=\"$$GCP_PROJECT_ID\" &&
-  #     export GCLOUD_PROJECT=\"$$GCP_PROJECT_ID\" &&
-  #     export CLOUDSDK_CORE_PROJECT=\"$$GCP_PROJECT_ID\" &&
-  #     export MLFLOW_ARTIFACT_ROOT=\"gs://$$MODEL_STORAGE_BUCKET_NAME/mlflow-artifacts\" &&
   #     mlflow server
   #     --host 0.0.0.0
   #     --port 5000
-  #     --backend-store-uri postgresql://$$POSTGRES_USER:$$POSTGRES_PASSWORD@$$POSTGRES_HOST:$$POSTGRES_PORT/$$POSTGRES_DB
-  #     --default-artifact-root $$MLFLOW_ARTIFACT_ROOT"
-
-  # redpanda:
-  #   image: docker.redpanda.com/redpandadata/redpanda:v26.1.9
-  #   command:
-  #     - redpanda
-  #     - start
-  #     - --smp
-  #     - "1"
-  #     - --overprovisioned
-  #     - --node-id
-  #     - "0"
-  #     - --kafka-addr
-  #     - PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
-  #     - --advertise-kafka-addr
-  #     - PLAINTEXT://redpanda:29092,OUTSIDE://172.21.0.1:9092
-  #     - --pandaproxy-addr
-  #     - 0.0.0.0:8082
-  #     - --advertise-pandaproxy-addr
-  #     - localhost:8082
-  #   ports:
-  #     - 8081:8081
-  #     - 8082:8082
-  #     - 9092:9092
-  #     - 29092:29092
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "rpk cluster info -X brokers=127.0.0.1:29092 >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8081/subjects >/dev/null"]
-  #     interval: 10s
-  #     timeout: 6s
-  #     retries: 10
-
-  # console:
-  #   image: docker.redpanda.com/redpandadata/console:v2.8.13
-  #   restart: on-failure
-  #   entrypoint: /bin/sh
-  #   command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml; /app/console"
-  #   environment:
-  #     CONFIG_FILEPATH: /tmp/config.yml
-  #     CONSOLE_CONFIG_FILE: |
-  #       kafka:
-  #         brokers: ["redpanda:29092"]
-  #         schemaRegistry:
-  #           enabled: true
-  #           urls: ["http://redpanda:8081"]
-  #   ports:
-  #     - "8090:8080"
+  #     --backend-store-uri postgresql://$$MLFLOW_DB_USER:$$MLFLOW_DB_PASSWORD@cloud-sql-proxy:5432/$$MLFLOW_DB
+  #     --default-artifact-root gs://$$MODEL_STORAGE_BUCKET_NAME/mlflow-artifacts"
   #   depends_on:
-  #     redpanda:
-  #       condition: service_healthy
-
-  # fraud-detection-api:
-  #   build:
-  #     context: ../..
-  #     dockerfile: infra/docker/Dockerfile.fraudDetection
-  #   env_file:
-  #     - ../../.env
-  #   ports:
-  #     - "1311:1311"
-  #   volumes:
-  #     - ../../certs:/app/certs:ro
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #     lgbserver:
-  #       condition: service_started
-  #     # redpanda:
-  #       # condition: service_healthy
-  #   restart: unless-stopped
-
-  # prediction-writer:
-  #   build:
-  #     context: ../..
-  #     dockerfile: infra/docker/Dockerfile.predictionWriter
-  #   env_file:
-  #     - ../../.env
-  #   volumes:
-  #     - ../../certs:/app/certs:ro
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redpanda:
+  #     cloud-sql-proxy:
   #       condition: service_healthy
   #   restart: unless-stopped
-
-  # feature-refresher:
-  #   build:
-  #     context: ../..
-  #     dockerfile: infra/docker/Dockerfile.featureRefresher
-  #   env_file:
-  #     - ../../.env
-  #   volumes:
-  #     - ../../certs:/app/certs:ro
-  #   depends_on:
-  #     redis:
-  #       condition: service_healthy
-  #     redpanda:
-  #       condition: service_healthy
-  #   restart: unless-stopped
-
-  # lgbserver:
-  #   image: kserve/lgbserver:latest
-  #   container_name: lightgbm-lgbserver
-  #   env_file:
-  #     - ../../.env
-  #   ports:
-  #     - "8085:9080"
-  #   volumes:
-  #     - ../../models:/mnt/models:ro
-  #   command:
-  #     - --model_dir
-  #     - /mnt/models
-  #     - --model_name
-  #     - fraud-detection
-  #     - --http_port
-  #     - "9080"
-  #     - --workers
-  #     - "${KSERVE_WORKERS:-5}"
-  #     - --nthread
-  #     - "${KSERVE_THREADS_PER_WORKER:-1}"
-
-  postgres:
-    image: postgres:16
-    env_file:
-      - ../../.env
-    environment:
-      TZ: Asia/Ho_Chi_Minh
-      PGTZ: Asia/Ho_Chi_Minh
-    command: ["postgres", "-c", "timezone=Asia/Ho_Chi_Minh"]
-    ports: ["5432:5432"]
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7.2-alpine
-    environment:
-      TZ: Asia/Ho_Chi_Minh
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    restart: unless-stopped
-
-  airflow-postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
-      TZ: Asia/Ho_Chi_Minh
-      PGTZ: Asia/Ho_Chi_Minh
-    volumes:
-      - airflow-pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
 
   airflow-init:
     <<: *airflow-common
@@ -261,9 +102,3 @@ services:
       airflow-init:
         condition: service_completed_successfully
     restart: unless-stopped
-
-volumes:
-  pgdata:
-  redis-data:
-  airflow-pgdata:
-  # grafana-data:
