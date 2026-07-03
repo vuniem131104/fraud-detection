@@ -1,75 +1,47 @@
-"""Batch feature ETL: transactions -> application.transaction_features.
+"""Incremental feature ETL: transactions -> application.transaction_features.
 
-Reads the raw six-table dataset, engineers a point-in-time-correct feature set
-(calendar, account/card static, card & user velocity, amount z-score, entity
-graph, prior declines) plus the fraud label, and loads it into
-``application.transaction_features`` via a fast ``COPY``.
+The point-in-time feature set (calendar, account/card static, card & user
+velocity, amount z-score, prior declines) is computed **entirely in Postgres**
+via window functions and only the rows inside the run's time window are inserted.
+Nothing is pulled into pandas, so the job's memory stays flat regardless of how
+large the history grows.
+
+Incremental strategy
+--------------------
+For a daily run over ``[start, end)`` we only need feature rows for transactions
+created in that window. But the velocity / expanding features of those rows
+depend on each card's & user's *earlier* history, so we can't look at the window
+alone. Instead we scope the computation to the **full history of exactly the
+cards and users active in the window** (an index seek on ``transactions``), run
+the window functions over that scoped set — which is complete for every entity
+we insert — and write only the window's rows. Work scales with *active* entities,
+not total table size. ``ON CONFLICT DO NOTHING`` makes re-runs idempotent
+(point-in-time features never change once computed).
+
+Passing ``start=end=None`` computes over all history (one-off backfill).
 
 Leakage discipline
 ------------------
-Every derived feature uses **only data available at or before the transaction's
-own timestamp** (trailing time windows, expanding stats shifted by one, and
-as-of cumulative counts). The table is rebuilt in full each run because the
-point-in-time windows require the complete history. ``label`` is the target, not
-a feature, and is NULL for transactions too recent to have ground truth.
+Every feature uses only data available at or before the transaction's own
+timestamp (trailing time windows, expanding stats framed to prior rows, gaps to
+the previous transaction). Calendar parts use UTC to match the original design.
+The fraud label is *not* stored here — it lives in ``application.labels`` and is
+joined on ``transaction_id`` at training time.
 """
 
-import io
 import os
-import warnings
+from datetime import datetime
 
-import numpy as np
-import pandas as pd
 import psycopg
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# psycopg 3 (the project's declared driver) is used directly rather than a
-# SQLAlchemy engine: Airflow pins SQLAlchemy < 2.0, but pandas 2.3 only accepts
-# a SQLAlchemy >= 2.0 connectable, so it can't use a 1.4 engine. A raw psycopg
-# connection sidesteps that for read_sql, and COPY is used for the write.
 CONNINFO = (
     f"host={os.getenv('POSTGRES_HOST')} port={os.getenv('POSTGRES_PORT')} "
     f"user={os.getenv('POSTGRES_USER')} password={os.getenv('POSTGRES_PASSWORD')} "
     f"dbname={os.getenv('POSTGRES_DB')}"
 )
-
-SOURCE_SQL = """
-SELECT
-    t.id            AS transaction_id,
-    t.user_id,
-    t.card_id,
-    t.merchant_id,
-    t.device_id,
-    t.created_at,
-    t.amount_usd,
-    t.channel,
-    t.status,
-    t.billing_country_code,
-    t.ip_country_code,
-    t.email_purchaser,
-    t.email_recipient,
-    u.created_at        AS user_created_at,
-    u.country_code      AS user_country,
-    u.customer_segment,
-    u.kyc_level,
-    u.email_verified,
-    c.created_at        AS card_created_at,
-    c.brand            AS card_brand,
-    c.type             AS card_type,
-    c.is_virtual,
-    m.category         AS merchant_category,
-    m.risk_level       AS merchant_risk_level,
-    l.label,
-    l.label_source
-FROM application.transactions t
-JOIN application.users u      ON u.id = t.user_id
-JOIN application.cards c      ON c.id = t.card_id
-JOIN application.merchants m  ON m.id = t.merchant_id
-LEFT JOIN application.labels l ON l.transaction_id = t.id
-ORDER BY t.created_at
-"""
 
 FEATURES_DDL = """
 CREATE TABLE IF NOT EXISTS application.transaction_features (
@@ -105,23 +77,19 @@ CREATE TABLE IF NOT EXISTS application.transaction_features (
     card_seconds_since_last_tx     DOUBLE PRECISION,
     card_amount_zscore             DOUBLE PRECISION,
     card_tx_seq                    INTEGER,
-    card_distinct_merchants_sofar  INTEGER,
     card_declines_24h              INTEGER,
     user_tx_count_24h              INTEGER,
     user_amount_sum_24h            DOUBLE PRECISION,
     user_seconds_since_last_tx     DOUBLE PRECISION,
-    device_distinct_users_sofar    INTEGER,
-    device_tx_count_sofar          INTEGER,
-    recipient_distinct_users_sofar INTEGER,
-    label                          SMALLINT,
-    label_source                   TEXT,
     computed_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS transaction_features_label_idx   ON application.transaction_features (label);
 CREATE INDEX IF NOT EXISTS transaction_features_created_idx ON application.transaction_features (created_at);
+-- Supports the per-entity window scans and the active-entity lookup below.
+CREATE INDEX IF NOT EXISTS transactions_card_created_idx ON application.transactions (card_id, created_at);
+CREATE INDEX IF NOT EXISTS transactions_user_created_idx ON application.transactions (user_id, created_at);
 """
 
-# Column order for the COPY write (must match FEATURES_DDL, excluding computed_at).
+# Feature column order (must match the SELECT aliases in _BUILD_TEMPLATE below).
 FEATURE_COLUMNS = [
     "transaction_id", "created_at", "user_id", "card_id", "merchant_id", "device_id",
     "amount_usd", "log_amount", "hour", "weekday", "is_night",
@@ -132,158 +100,163 @@ FEATURE_COLUMNS = [
     "geo_mismatch", "foreign_ip", "recipient_differs", "is_declined",
     "card_tx_count_1h", "card_tx_count_24h", "card_amount_sum_24h",
     "card_seconds_since_last_tx", "card_amount_zscore", "card_tx_seq",
-    "card_distinct_merchants_sofar", "card_declines_24h",
+    "card_declines_24h",
     "user_tx_count_24h", "user_amount_sum_24h", "user_seconds_since_last_tx",
-    "device_distinct_users_sofar", "device_tx_count_sofar", "recipient_distinct_users_sofar",
-    "label", "label_source",
 ]
 
+# The point-in-time feature computation. ``{with_kw}``/``{ctx_where}``/
+# ``{insert_where}`` are filled in per-mode (incremental vs backfill); ``{cols}``
+# is the shared column list. Named windows (WINDOW clause) keep the frames DRY.
+_BUILD_TEMPLATE = """
+{with_kw} ctx AS (
+    SELECT
+        t.id AS transaction_id, t.created_at, t.user_id, t.card_id, t.merchant_id, t.device_id,
+        t.amount_usd, t.channel, t.status, t.billing_country_code, t.ip_country_code,
+        t.email_purchaser, t.email_recipient,
+        u.created_at AS user_created_at, u.country_code AS user_country,
+        u.customer_segment, u.kyc_level, u.email_verified,
+        c.created_at AS card_created_at, c.brand AS card_brand, c.type AS card_type, c.is_virtual,
+        m.category AS merchant_category, m.risk_level AS merchant_risk_level
+    FROM application.transactions t
+    JOIN application.users u     ON u.id = t.user_id
+    JOIN application.cards c     ON c.id = t.card_id
+    JOIN application.merchants m ON m.id = t.merchant_id
+    {ctx_where}
+),
+feat AS (
+    SELECT
+        transaction_id, created_at, user_id, card_id, merchant_id, device_id,
+        amount_usd,
+        ln(1 + amount_usd) AS log_amount,
+        extract(hour from created_at at time zone 'UTC')::smallint AS hour,
+        (extract(isodow from created_at at time zone 'UTC')::int - 1)::smallint AS weekday,
+        (CASE WHEN extract(hour from created_at at time zone 'UTC') < 6
+                OR extract(hour from created_at at time zone 'UTC') >= 23
+              THEN 1 ELSE 0 END)::smallint AS is_night,
+        channel, card_brand, card_type, is_virtual,
+        customer_segment, kyc_level, email_verified,
+        merchant_category, merchant_risk_level,
+        floor(extract(epoch from (created_at - user_created_at)) / 86400)::int AS account_age_days,
+        floor(extract(epoch from (created_at - card_created_at)) / 86400)::int AS card_age_days,
+        (billing_country_code IS DISTINCT FROM ip_country_code)::int::smallint AS geo_mismatch,
+        (ip_country_code IS DISTINCT FROM user_country)::int::smallint AS foreign_ip,
+        (email_recipient IS NOT NULL
+            AND email_recipient IS DISTINCT FROM email_purchaser)::int::smallint AS recipient_differs,
+        (status = 'declined')::int::smallint AS is_declined,
+        (count(*) OVER w_card_1h)::int AS card_tx_count_1h,
+        (count(*) OVER w_card_24h)::int AS card_tx_count_24h,
+        sum(amount_usd) OVER w_card_24h AS card_amount_sum_24h,
+        extract(epoch from (created_at - lag(created_at) OVER w_card)) AS card_seconds_since_last_tx,
+        (amount_usd - avg(amount_usd) OVER w_card_prior)
+            / nullif(stddev_samp(amount_usd) OVER w_card_prior, 0) AS card_amount_zscore,
+        (row_number() OVER w_card)::int AS card_tx_seq,
+        greatest((sum((status = 'declined')::int) OVER w_card_24h)
+                 - (status = 'declined')::int, 0)::int AS card_declines_24h,
+        (count(*) OVER w_user_24h)::int AS user_tx_count_24h,
+        sum(amount_usd) OVER w_user_24h AS user_amount_sum_24h,
+        extract(epoch from (created_at - lag(created_at) OVER w_user)) AS user_seconds_since_last_tx
+    FROM ctx
+    WINDOW
+        w_card       AS (PARTITION BY card_id ORDER BY created_at),
+        w_card_1h    AS (PARTITION BY card_id ORDER BY created_at
+                         RANGE BETWEEN INTERVAL '1 hour'  PRECEDING AND CURRENT ROW),
+        w_card_24h   AS (PARTITION BY card_id ORDER BY created_at
+                         RANGE BETWEEN INTERVAL '24 hours' PRECEDING AND CURRENT ROW),
+        w_card_prior AS (PARTITION BY card_id ORDER BY created_at
+                         ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+        w_user       AS (PARTITION BY user_id ORDER BY created_at),
+        w_user_24h   AS (PARTITION BY user_id ORDER BY created_at
+                         RANGE BETWEEN INTERVAL '24 hours' PRECEDING AND CURRENT ROW)
+)
+INSERT INTO application.transaction_features ({cols})
+SELECT {cols} FROM feat
+{insert_where}
+ON CONFLICT (transaction_id) DO NOTHING
+"""
 
-def read_transactions() -> pd.DataFrame:
-    """Load the joined source rows, sorted by ``created_at`` (required for windows)."""
-    with psycopg.connect(CONNINFO) as conn:
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
-            df = pd.read_sql(SOURCE_SQL, conn)
-    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
-    df["user_created_at"] = pd.to_datetime(df["user_created_at"], utc=True)
-    df["card_created_at"] = pd.to_datetime(df["card_created_at"], utc=True)
-    df["amount_usd"] = df["amount_usd"].astype(float)
-    return df.sort_values("created_at").reset_index(drop=True)
+_WINDOW_PREDICATE = "created_at >= %(start)s::timestamptz AND created_at < %(end)s::timestamptz"
 
 
-def add_static_features(df: pd.DataFrame) -> None:
-    """Row-local features: calendar, ages, amount transform, geo/identity flags."""
-    ts = df["created_at"].dt
-    df["hour"] = ts.hour.astype("int16")
-    df["weekday"] = ts.dayofweek.astype("int16")
-    df["is_night"] = ((df["hour"] < 6) | (df["hour"] >= 23)).astype("int16")
-    df["log_amount"] = np.log1p(df["amount_usd"])
-    df["account_age_days"] = (df["created_at"] - df["user_created_at"]).dt.days
-    df["card_age_days"] = (df["created_at"] - df["card_created_at"]).dt.days
-    df["geo_mismatch"] = (df["billing_country_code"] != df["ip_country_code"]).astype("int16")
-    df["foreign_ip"] = (df["ip_country_code"] != df["user_country"]).astype("int16")
-    df["recipient_differs"] = (
-        df["email_recipient"].notna() & (df["email_recipient"] != df["email_purchaser"])
-    ).astype("int16")
-    # NOTE: current-tx status is a *post-authorization* signal — do not feed it to a
-    # pre-auth model (see card_declines_24h for the leakage-safe historical version).
-    df["is_declined"] = (df["status"] == "declined").astype("int16")
+def _build_sql(incremental: bool) -> str:
+    """Assemble the INSERT for either an incremental window or a full backfill."""
+    cols = ", ".join(FEATURE_COLUMNS)
+    if incremental:
+        with_kw = (
+            "WITH win AS (\n"
+            "    SELECT DISTINCT card_id, user_id FROM application.transactions\n"
+            f"    WHERE {_WINDOW_PREDICATE}\n"
+            "),"
+        )
+        ctx_where = (
+            "WHERE t.card_id IN (SELECT card_id FROM win)\n"
+            "       OR t.user_id IN (SELECT user_id FROM win)"
+        )
+        insert_where = f"WHERE {_WINDOW_PREDICATE}"
+    else:
+        with_kw, ctx_where, insert_where = "WITH", "", ""
+    return _BUILD_TEMPLATE.format(
+        with_kw=with_kw, ctx_where=ctx_where, insert_where=insert_where, cols=cols
+    )
 
 
-def add_velocity_features(df: pd.DataFrame) -> None:
-    """Trailing time-window + expanding features per card and per user.
+def check_source() -> None:
+    """Fail fast if the source tables are empty (nothing to build features from)."""
+    with psycopg.connect(CONNINFO) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM application.transactions")
+        n_tx = cur.fetchone()[0]
+        cur.execute("SELECT count(*) FROM application.labels")
+        n_lbl = cur.fetchone()[0]
+    print(f"Source: {n_tx:,} transactions, {n_lbl:,} labels")
+    if n_tx == 0:
+        raise ValueError("application.transactions is empty — aborting feature build")
 
-    Rolling stats are computed on an entity+time-sorted view and written back
-    positionally: ``groupby().rolling(on=...)`` indexes its result by the *on*
-    column, so index-based realignment would silently produce NaN. Windows
-    include the current transaction (its attributes are known at scoring time);
-    ``card_declines_24h`` and the ``*_seconds_since_last_tx`` gaps use prior rows.
+
+def build_features(start: str | datetime | None = None,
+                   end: str | datetime | None = None) -> int:
+    """Compute & upsert features for ``[start, end)``; both None => full backfill.
+
+    Returns the number of rows actually inserted (0 on an idempotent re-run).
     """
-    # --- per card, on a (card, time)-sorted view ---
-    dc = df.sort_values(["card_id", "created_at"])
-    by_card = dc.groupby("card_id", sort=False)
-    r1h = by_card.rolling("1h", on="created_at")["amount_usd"]
-    r24 = by_card.rolling("24h", on="created_at")
-    dc["card_tx_count_1h"] = r1h.count().values
-    dc["card_tx_count_24h"] = r24["amount_usd"].count().values
-    dc["card_amount_sum_24h"] = r24["amount_usd"].sum().values
-    declines_incl = by_card.rolling("24h", on="created_at")["is_declined"].sum().values
-    dc["card_declines_24h"] = np.clip(declines_incl - dc["is_declined"].to_numpy(), 0, None)
-    dc["card_tx_seq"] = by_card.cumcount() + 1
-    dc["card_seconds_since_last_tx"] = by_card["created_at"].diff().dt.total_seconds()
-    amt = by_card["amount_usd"]
-    mean_prior = amt.transform(lambda s: s.expanding().mean().shift(1))
-    std_prior = amt.transform(lambda s: s.expanding().std().shift(1))
-    dc["card_amount_zscore"] = (
-        (dc["amount_usd"] - mean_prior) / std_prior).replace([np.inf, -np.inf], np.nan)
-    for col in ("card_tx_count_1h", "card_tx_count_24h", "card_amount_sum_24h",
-                "card_declines_24h", "card_tx_seq", "card_seconds_since_last_tx",
-                "card_amount_zscore"):
-        df[col] = dc[col]
-
-    # --- per user, on a (user, time)-sorted view ---
-    du = df.sort_values(["user_id", "created_at"])
-    by_user = du.groupby("user_id", sort=False)
-    ru = by_user.rolling("24h", on="created_at")
-    du["user_tx_count_24h"] = ru["amount_usd"].count().values
-    du["user_amount_sum_24h"] = ru["amount_usd"].sum().values
-    du["user_seconds_since_last_tx"] = by_user["created_at"].diff().dt.total_seconds()
-    for col in ("user_tx_count_24h", "user_amount_sum_24h", "user_seconds_since_last_tx"):
-        df[col] = du[col]
-
-    for col in ("card_tx_count_1h", "card_tx_count_24h", "card_declines_24h",
-                "card_tx_seq", "user_tx_count_24h"):
-        df[col] = df[col].astype("int32")
-
-
-def add_graph_features(df: pd.DataFrame) -> None:
-    """As-of cumulative graph counts (fraud-ring / device-farm signals).
-
-    For each row: how many distinct users / transactions this device has seen so
-    far, and how many distinct users share this recipient email so far. Computed
-    via first-occurrence cumsum on the time-sorted frame, so it never peeks ahead.
-    """
-    df["device_tx_count_sofar"] = (
-        df.groupby("device_id", sort=False).cumcount() + 1).astype("int32")
-    first_dev_user = ~df.duplicated(["device_id", "user_id"])
-    df["device_distinct_users_sofar"] = (
-        first_dev_user.groupby(df["device_id"], sort=False).cumsum().astype("int32"))
-
-    first_card_merch = ~df.duplicated(["card_id", "merchant_id"])
-    df["card_distinct_merchants_sofar"] = (
-        first_card_merch.groupby(df["card_id"], sort=False).cumsum().astype("int32"))
-
-    has_rcpt = df["email_recipient"].notna()
-    first_rcpt_user = pd.Series(False, index=df.index)
-    first_rcpt_user.loc[has_rcpt] = ~df.loc[has_rcpt].duplicated(["email_recipient", "user_id"])
-    rcpt = first_rcpt_user.groupby(df["email_recipient"], sort=False).cumsum()
-    df["recipient_distinct_users_sofar"] = rcpt.fillna(0).astype("int32")
-    df.loc[~has_rcpt, "recipient_distinct_users_sofar"] = 0
-
-
-def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Run every feature stage and return the frame with typed nullable columns."""
-    add_static_features(df)
-    add_velocity_features(df)
-    add_graph_features(df)
-    df["label"] = df["label"].astype("Int64")   # nullable: NULL for unlabeled tx
-    return df
-
-
-def write_features(df: pd.DataFrame) -> int:
-    """(Re)create the feature table and bulk-load rows via CSV COPY. Returns row count.
-
-    CSV COPY (rather than ``write_row``) avoids psycopg's lack of adapters for
-    numpy scalar dtypes and maps NaN/NaT/<NA> to SQL NULL via ``na_rep=''``.
-    """
-    payload = df[FEATURE_COLUMNS]
-    buf = io.StringIO()
-    payload.to_csv(buf, index=False, header=False, na_rep="")
-    columns = ", ".join(FEATURE_COLUMNS)
-    with psycopg.connect(CONNINFO) as conn:
-        with conn.cursor() as cur:
-            cur.execute(FEATURES_DDL)
-            cur.execute("TRUNCATE application.transaction_features")
-            with cur.copy(
-                f"COPY application.transaction_features ({columns}) "
-                f"FROM STDIN WITH (FORMAT csv, NULL '')"
-            ) as copy:
-                copy.write(buf.getvalue())
+    incremental = start is not None and end is not None
+    sql = _build_sql(incremental)
+    params = {"start": start, "end": end} if incremental else {}
+    scope = f"window [{start}, {end})" if incremental else "FULL history (backfill)"
+    print(f"Building features for {scope}")
+    with psycopg.connect(CONNINFO) as conn, conn.cursor() as cur:
+        cur.execute(FEATURES_DDL)
+        cur.execute(sql, params)
+        inserted = cur.rowcount
         conn.commit()
-    return len(payload)
+    print(f"Inserted {inserted:,} feature rows ({len(FEATURE_COLUMNS)} columns)")
+    return inserted
 
 
-def build_transaction_features() -> int:
-    """Airflow entry point: read -> engineer -> load. Returns rows written."""
-    df = read_transactions()
-    print(f"Read {len(df):,} transactions")
-    df = engineer_features(df)
-    written = write_features(df)
-    print(f"Wrote {written:,} rows to application.transaction_features "
-          f"({len(FEATURE_COLUMNS)} feature columns)")
-    return written
+def validate_output(start: str | datetime | None = None,
+                    end: str | datetime | None = None) -> None:
+    """Assert every source transaction in scope has a matching feature row."""
+    incremental = start is not None and end is not None
+    with psycopg.connect(CONNINFO) as conn, conn.cursor() as cur:
+        if incremental:
+            params = {"start": start, "end": end}
+            cur.execute(
+                f"SELECT count(*) FROM application.transactions WHERE {_WINDOW_PREDICATE}", params)
+            expected = cur.fetchone()[0]
+            cur.execute(
+                f"SELECT count(*) FROM application.transaction_features WHERE {_WINDOW_PREDICATE}",
+                params)
+            actual = cur.fetchone()[0]
+        else:
+            cur.execute("SELECT count(*) FROM application.transactions")
+            expected = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM application.transaction_features")
+            actual = cur.fetchone()[0]
+    print(f"Validate: {actual:,} feature rows for {expected:,} transactions in scope")
+    if actual != expected:
+        raise ValueError(f"Coverage mismatch: {actual:,} feature rows vs {expected:,} transactions")
 
 
 if __name__ == "__main__":
-    build_transaction_features()
+    # Standalone/local run: full backfill of the whole history.
+    check_source()
+    build_features()
+    validate_output()

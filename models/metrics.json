@@ -1,11 +1,12 @@
 {
-  "val_roc_auc": 0.9419612291245854,
-  "val_pr_auc": 0.6271715563759425,
-  "val_precision_at_1pct": 0.9005649717514125,
-  "best_iteration": 317,
-  "n_features": 250,
-  "n_train_phase_a": 501959,
-  "scale_pos_weight": 27.552844141069396,
-  "phase_b_n_rounds": 348,
-  "n_train_phase_b": 590540
+  "val_roc_auc": 0.9524989147517161,
+  "val_pr_auc": 0.8532173081818413,
+  "val_precision_at_1pct": 0.4789915966386555,
+  "val_precision_at_0.5pct": 0.9213483146067416,
+  "best_iteration": 1039,
+  "n_features": 29,
+  "n_train_phase_a": 202424,
+  "scale_pos_weight": 205.55510204081634,
+  "phase_b_n_rounds": 1142,
+  "n_train_phase_b": 238146
 }
