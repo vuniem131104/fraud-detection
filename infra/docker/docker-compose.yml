@@ -148,26 +148,26 @@ services:
   #       condition: service_healthy
   #   restart: unless-stopped
 
-  # lgbserver:
-  #   image: kserve/lgbserver:latest
-  #   container_name: lightgbm-lgbserver
-  #   env_file:
-  #     - ../../.env
-  #   ports:
-  #     - "8085:9080"
-  #   volumes:
-  #     - ../../models:/mnt/models:ro
-  #   command:
-  #     - --model_dir
-  #     - /mnt/models
-  #     - --model_name
-  #     - fraud-detection
-  #     - --http_port
-  #     - "9080"
-  #     - --workers
-  #     - "${KSERVE_WORKERS:-5}"
-  #     - --nthread
-  #     - "${KSERVE_THREADS_PER_WORKER:-1}"
+  lgbserver:
+    image: kserve/lgbserver:latest
+    container_name: lightgbm-lgbserver
+    env_file:
+      - ../../.env
+    ports:
+      - "8085:9080"
+    volumes:
+      - ../../models:/mnt/models:ro
+    command:
+      - --model_dir
+      - /mnt/models
+      - --model_name
+      - fraud-detection
+      - --http_port
+      - "9080"
+      - --workers
+      - "${KSERVE_WORKERS:-5}"
+      - --nthread
+      - "${KSERVE_THREADS_PER_WORKER:-1}"
 
   postgres:
     image: postgres:16
