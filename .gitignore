@@ -8,7 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
-dataset
+# DVC-tracked datasets: ignore the data files, but keep the .dvc pointers and
+# DVC's own .gitignore under version control.
+dataset/*
+!dataset/*.dvc
+!dataset/.gitignore
 .env
 data/
 

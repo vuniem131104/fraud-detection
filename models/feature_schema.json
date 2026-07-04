@@ -90,10 +90,13 @@
   },
   "lgb_params": {
     "objective": "binary",
-    "metric": "auc",
+    "metric": [
+      "average_precision",
+      "auc"
+    ],
     "boosting_type": "gbdt",
-    "learning_rate": 0.03,
-    "num_leaves": 64,
+    "learning_rate": 0.02,
+    "num_leaves": 128,
     "min_child_samples": 100,
     "feature_fraction": 0.7,
     "bagging_fraction": 0.85,
