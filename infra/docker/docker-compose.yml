@@ -49,23 +49,23 @@ services:
       retries: 6
       start_period: 20s
 
-  # mlflow:
-  #   image: ghcr.io/mlflow/mlflow:v3.12.0
-  #   env_file:
-  #     - ../../.env
-  #   ports:
-  #     - "5000:5000"
-  #   command: >
-  #     sh -c "pip install -q psycopg2-binary google-cloud-storage &&
-  #     mlflow server
-  #     --host 0.0.0.0
-  #     --port 5000
-  #     --backend-store-uri postgresql://$$MLFLOW_DB_USER:$$MLFLOW_DB_PASSWORD@cloud-sql-proxy:5432/$$MLFLOW_DB
-  #     --default-artifact-root gs://$$MODEL_STORAGE_BUCKET_NAME/mlflow-artifacts"
-  #   depends_on:
-  #     cloud-sql-proxy:
-  #       condition: service_healthy
-  #   restart: unless-stopped
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.12.0
+    env_file:
+      - ../../.env
+    ports:
+      - "5000:5000"
+    command: >
+      sh -c "pip install -q psycopg2-binary google-cloud-storage &&
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://$$MLFLOW_DB_USER:$$MLFLOW_DB_PASSWORD@cloud-sql-proxy:5432/$$MLFLOW_DB
+      --default-artifact-root gs://$$MODEL_STORAGE_BUCKET_NAME/mlflow-artifacts"
+    depends_on:
+      cloud-sql-proxy:
+        condition: service_healthy
+    restart: unless-stopped
 
   airflow-init:
     <<: *airflow-common
