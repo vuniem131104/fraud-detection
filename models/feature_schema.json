@@ -1,6 +1,7 @@
 {
   "version": 1,
-  "source_table": "application.transaction_features",
+  "offline_source": "feast::fraud_detection_service",
+  "feature_view": "transaction_features",
   "label_table": "application.labels",
   "target": "label",
   "feature_columns": [
@@ -87,24 +88,12 @@
       "True": 1
     }
   },
-  "dropped_columns": [
-    "card_id",
-    "computed_at",
-    "created_at",
-    "device_id",
-    "is_declined",
-    "label",
-    "label_source",
-    "merchant_id",
-    "transaction_id",
-    "user_id"
-  ],
   "lgb_params": {
     "objective": "binary",
     "metric": "auc",
     "boosting_type": "gbdt",
-    "learning_rate": 0.02,
-    "num_leaves": 128,
+    "learning_rate": 0.03,
+    "num_leaves": 64,
     "min_child_samples": 100,
     "feature_fraction": 0.7,
     "bagging_fraction": 0.85,

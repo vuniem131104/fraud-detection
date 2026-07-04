@@ -4,7 +4,7 @@ provider: local
 
 registry:
   registry_type: sql
-  path: postgresql+psycopg://vuniem:vuniem131104@localhost:5432/feast_registry
+  path: postgresql+psycopg://vuniem:Vuniem131104!@localhost:5432/feast-registry
 
 offline_store:
   type: postgres
@@ -13,7 +13,7 @@ offline_store:
   database: fraud-detection
   db_schema: application
   user: vuniem
-  password: vuniem131104
+  password: Vuniem131104!
   sslmode: disable
 
 online_store:

@@ -143,7 +143,7 @@ class PredictionWriter(BaseKafkaWorker):
             await self.database.execute(
                 """
                 INSERT INTO application.prediction_logs (
-                    tx_id, model_name, model_version,
+                    transaction_id, model_name, model_version,
                     fraud_score, prediction, threshold, latency_ms
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7)

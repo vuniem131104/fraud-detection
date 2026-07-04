@@ -9,4 +9,5 @@ transaction_source = PostgreSQLSource(
         FROM application.transaction_features
     """,
     timestamp_field="created_at",
+    created_timestamp_column="computed_at",
 )

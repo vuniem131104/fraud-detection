@@ -1,52 +1,27 @@
 """Pydantic request and response schemas for the fraud detection API.
 
-Defines the validated transaction payload accepted by the scoring endpoint
-(``FraudDetectionInputs``) and the structure of the scoring result returned to
-the caller (``FraudDetectionOutputs``).
+The scoring endpoint identifies a transaction by its ``tx_id`` and the
+``(user_id, card_id)`` entity pair; the 29 model features are read from the
+Feast online store rather than sent in the request. ``FraudDetectionOutputs``
+is the scoring result returned to the caller.
 """
 
-from pydantic import BaseModel, Field
-from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field
+
 
 class FraudDetectionInputs(BaseModel):
     """Validated input schema for a single transaction to be scored.
 
-    Captures the raw transaction, card, device and IEEE-style count/time-delta/
-    match features (``C*``/``D*``/``M*``, accepted via their uppercase aliases)
-    used to build the model feature vector.
+    Carries only the identifiers needed to look up precomputed features in the
+    online store; the feature vector itself is fetched by ``(user_id, card_id)``.
     """
 
-    tx_id: str = Field(min_length=1)
-    event_timestamp: str = Field(min_length=1)
-    amount_usd: float = Field(gt=0)
-    channel: str = Field(min_length=1)
+    model_config = ConfigDict(extra="forbid")
+
+    transaction_id: str = Field(min_length=1)
     user_id: str = Field(min_length=1)
     card_id: str = Field(min_length=1)
-    card_country: int = Field(ge=0)
-    issuer_code: int = Field(ge=0)
-    card_brand: str = Field(min_length=1)
-    bin_code: str = Field(min_length=1)
-    card_type: str = Field(min_length=1)
-    billing_zone: int = Field(ge=0)
-    billing_country: int = Field(ge=0)
-    email_purchaser: str = Field(min_length=1)
-    email_recipient: str = Field(min_length=1)
-    device_type: str = Field(min_length=1)
-    device_info: str = Field(min_length=1)
-    os_raw: str = Field(min_length=1)
-    browser_raw: str = Field(min_length=1)
-    screen_resolution: str = Field(pattern=r"^\d+x\d+$")
-    # Count features
-    c1: int = Field(alias="C1", ge=0)
-    c2: int = Field(alias="C2", ge=0)
-    c13: int = Field(alias="C13", ge=0, default=0)
-    # Time delta features
-    d4: float = Field(alias="D4", ge=0, default=0)
-    d15: float = Field(alias="D15", ge=0, default=0)
-    # Match features
-    m1: str = Field(alias="M1", pattern=r"^[TF]$")
-    m2: str = Field(alias="M2", pattern=r"^[TF]$")
-    m6: str = Field(alias="M6", pattern=r"^[TF]$")
+
 
 class FraudDetectionOutputs(BaseModel):
     """Scoring result for a single transaction.
@@ -55,6 +30,6 @@ class FraudDetectionOutputs(BaseModel):
     prediction derived from the configured decision threshold.
     """
 
-    tx_id: str
+    transaction_id: str
     probability: float
     prediction: int
