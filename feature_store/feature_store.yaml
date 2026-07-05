@@ -4,11 +4,11 @@ provider: local
 
 registry:
   registry_type: sql
-  path: postgresql+psycopg://vuniem:Vuniem131104!@localhost:5432/feast-registry
+  path: postgresql+psycopg://vuniem:Vuniem131104!@10.59.144.3:5432/feast-registry
 
 offline_store:
   type: postgres
-  host: localhost
+  host: 10.59.144.3
   port: 5432
   database: fraud-detection
   db_schema: application
