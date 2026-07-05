@@ -4,19 +4,19 @@ provider: local
 
 registry:
   registry_type: sql
-  path: postgresql+psycopg://vuniem:Vuniem131104!@10.59.144.3:5432/feast-registry
+  path: ${FEAST_REGISTRY_PATH}
 
 offline_store:
   type: postgres
-  host: 10.59.144.3
-  port: 5432
-  database: fraud-detection
+  host: ${POSTGRES_HOST}
+  port: ${POSTGRES_PORT}
+  database: ${POSTGRES_DB}
   db_schema: application
-  user: vuniem
-  password: Vuniem131104!
-  sslmode: disable
+  user: ${POSTGRES_USER}
+  password: ${POSTGRES_PASSWORD}
+  sslmode: require
 
 online_store:
   type: redis
-  connection_string: 10.102.22.67:6379
+  connection_string: ${REDIS_HOST}:${REDIS_PORT}
   key_ttl_seconds: 604800
