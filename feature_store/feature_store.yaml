@@ -1,0 +1,22 @@
+project: fraud_detection
+
+provider: local
+
+registry:
+  registry_type: sql
+  path: postgresql+psycopg://vuniem:Vuniem131104!@localhost:5432/feast-registry
+
+offline_store:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: fraud-detection
+  db_schema: application
+  user: vuniem
+  password: Vuniem131104!
+  sslmode: disable
+
+online_store:
+  type: redis
+  connection_string: 10.102.22.67:6379
+  key_ttl_seconds: 604800
