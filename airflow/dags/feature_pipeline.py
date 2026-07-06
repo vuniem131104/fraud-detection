@@ -2,7 +2,7 @@ from datetime import datetime
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-
+from feast import FeatureStore
 from etl.feature_etl import build_features, check_source, validate_output
 
 default_args = {
@@ -11,6 +11,12 @@ default_args = {
 }
 
 WINDOW = {"start": "{{ data_interval_start }}", "end": "{{ data_interval_end }}"}
+
+def materialize_incremental(end):
+    store = FeatureStore(repo_path="/opt/airflow/feast_repo")
+    store.materialize_incremental(end_date=datetime.fromisoformat(end))
+    print(f"Materialized features up to {end}")
+
 
 with DAG(
     dag_id="feature_pipeline",
@@ -35,5 +41,10 @@ with DAG(
         python_callable=validate_output,
         op_kwargs=WINDOW,
     )
+    t_materialize = PythonOperator(
+        task_id="materialize_incremental",
+        python_callable=materialize_incremental,
+        op_kwargs={"end": "{{ data_interval_end }}"},
+    )
 
-    t_check >> t_build >> t_validate
+    t_check >> t_build >> t_validate >> t_materialize
