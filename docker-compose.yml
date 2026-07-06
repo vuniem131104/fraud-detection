@@ -7,6 +7,9 @@ x-airflow-common: &airflow-common
     - .env
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    # Airflow 3 defaults to SimpleAuthManager; use FAB so `airflow users create`
+    # works and username/password login is honored (needs apache-airflow-providers-fab).
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
     AIRFLOW__CORE__FERNET_KEY: ""
@@ -74,6 +77,7 @@ services:
       - -c
       - |
         airflow db migrate
+        airflow fab-db migrate
         airflow users create \
           --username "${AIRFLOW_ADMIN_USER:-airflow}" \
           --password "${AIRFLOW_ADMIN_PASSWORD:-airflow}" \
@@ -88,6 +92,22 @@ services:
       - "8090:8080"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Airflow 3 moved DAG file parsing out of the scheduler into a standalone
+  # process. Without this service no DAG files are parsed and the UI shows none.
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD", "airflow", "jobs", "check", "--job-type", "DagProcessorJob", "--local"]
       interval: 30s
       timeout: 10s
       retries: 5
