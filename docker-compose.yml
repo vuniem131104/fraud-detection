@@ -1,7 +1,10 @@
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.10.5
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: fraud-detection/airflow:3.2.2
   env_file:
-    - ../../.env
+    - .env
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -12,13 +15,13 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "600"
     AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: "600"
     TZ: Asia/Ho_Chi_Minh
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-psycopg[binary]}
     PYTHONPATH: /opt/airflow/code
   volumes:
-    - ../../airflow/dags:/opt/airflow/dags
-    - ../../airflow/etl:/opt/airflow/code/etl
-    - ../../airflow/logs:/opt/airflow/logs
-    - ../../airflow/plugins:/opt/airflow/plugins
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/etl:/opt/airflow/code/etl
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./feature_store:/opt/airflow/feature_store
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends-on
     cloud-sql-proxy:
@@ -28,13 +31,15 @@ services:
 
   cloud-sql-proxy:
     image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1-alpine
+    env_file:
+      - .env
     restart: unless-stopped
     user: "${AIRFLOW_UID:-1000}:0"
     # local only
-    # volumes:
-    #   - ${HOME}/.config/gcloud/application_default_credentials.json:/gcp/adc.json:ro
-    # environment:
-    #   GOOGLE_APPLICATION_CREDENTIALS: /gcp/adc.json
+    volumes:
+      - ${HOME}/.config/gcloud/application_default_credentials.json:/gcp/adc.json:ro
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /gcp/adc.json
     command:
       - "--address=0.0.0.0"
       - "--port=5432"
@@ -52,7 +57,7 @@ services:
   mlflow:
     image: ghcr.io/mlflow/mlflow:v3.12.0
     env_file:
-      - ../../.env
+      - .env
     ports:
       - "5000:5000"
     command: >

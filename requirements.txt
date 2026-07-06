@@ -1,0 +1,18 @@
+# Python dependencies baked into the custom Airflow image (Dockerfile).
+# Used by the airflow-* services so the Feast feature pipeline
+# (airflow/dags/feature_pipeline.py -> airflow/etl/feature_etl.py) can run.
+
+# Feast with the stores this project uses (see feature_store/feature_store.yaml):
+#   - redis    -> online store   (online_store.type: redis)
+#   - postgres -> offline store  (offline_store.type: postgres)
+# The postgres extra also provides psycopg 3, used by the SQL registry
+# (registry_type: sql, path: postgresql+psycopg://...).
+feast[redis,postgres]
+
+# psycopg 3 (explicit): the single Postgres driver for everything in this image —
+#   - Feast SQL registry + postgres offline store (postgresql+psycopg://...)
+#   - Airflow metadata DB (AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg://...)
+#   - the feature ETL DAG (airflow/etl/feature_etl.py: `import psycopg`)
+# Airflow 3.2.2 ships SQLAlchemy 2.0.x, which supports the `+psycopg` (psycopg3)
+# dialect. `pool` enables the built-in connection pool Feast relies on.
+psycopg[binary,pool]

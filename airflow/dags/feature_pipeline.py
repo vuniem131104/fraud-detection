@@ -10,9 +10,6 @@ default_args = {
     "retries": 1,
 }
 
-# The daily [start, end) data interval is the incremental window: 00:00 the
-# previous day -> 00:00 today. Features for transactions in this window are
-# computed (using each active entity's full prior history) and upserted.
 WINDOW = {"start": "{{ data_interval_start }}", "end": "{{ data_interval_end }}"}
 
 with DAG(
