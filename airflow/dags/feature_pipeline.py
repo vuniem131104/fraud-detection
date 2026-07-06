@@ -13,7 +13,7 @@ default_args = {
 WINDOW = {"start": "{{ data_interval_start }}", "end": "{{ data_interval_end }}"}
 
 def materialize_incremental(end):
-    store = FeatureStore(repo_path="/opt/airflow/feast_repo")
+    store = FeatureStore(repo_path="/opt/airflow/feature_store")
     store.materialize_incremental(end_date=datetime.fromisoformat(end))
     print(f"Materialized features up to {end}")
 
