@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from feast import FeatureView, Field
-from feast.types import Float64, Int64, String, Bool
+from feast.types import Float64, Int64, String, Bool, UnixTimestamp
 
 from data_sources import transaction_source
 from entities import user, card
@@ -30,6 +30,9 @@ transaction_features = FeatureView(
         Field(name="merchant_category", dtype=String),
         Field(name="merchant_risk_level", dtype=Int64),
 
+        Field(name="user_country", dtype=String),
+        Field(name="account_created_at", dtype=UnixTimestamp),
+        Field(name="card_created_at", dtype=UnixTimestamp),
         Field(name="account_age_days", dtype=Int64),
         Field(name="card_age_days", dtype=Int64),
 

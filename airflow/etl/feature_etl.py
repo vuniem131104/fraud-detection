@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS application.transaction_features (
     email_verified                 BOOLEAN,
     merchant_category              TEXT,
     merchant_risk_level            SMALLINT,
+    user_country                   TEXT,
+    account_created_at             TIMESTAMPTZ,
+    card_created_at                TIMESTAMPTZ,
     account_age_days               INTEGER,
     card_age_days                  INTEGER,
     geo_mismatch                   SMALLINT,
@@ -93,6 +96,7 @@ FEATURE_COLUMNS = [
     "channel", "card_brand", "card_type", "is_virtual",
     "customer_segment", "kyc_level", "email_verified",
     "merchant_category", "merchant_risk_level",
+    "user_country", "account_created_at", "card_created_at",
     "account_age_days", "card_age_days",
     "geo_mismatch", "foreign_ip", "recipient_differs", "is_declined",
     "card_tx_count_1h", "card_tx_count_24h", "card_amount_sum_24h",
@@ -133,6 +137,9 @@ feat AS (
         channel, card_brand, card_type, is_virtual,
         customer_segment, kyc_level, email_verified,
         merchant_category, merchant_risk_level,
+        user_country,
+        user_created_at AS account_created_at,
+        card_created_at,
         floor(extract(epoch from (created_at - user_created_at)) / 86400)::int AS account_age_days,
         floor(extract(epoch from (created_at - card_created_at)) / 86400)::int AS card_age_days,
         (billing_country_code IS DISTINCT FROM ip_country_code)::int::smallint AS geo_mismatch,
@@ -252,8 +259,8 @@ def validate_output(start: str | datetime | None = None,
         raise ValueError(f"Coverage mismatch: {actual:,} feature rows vs {expected:,} transactions")
 
 
-# if __name__ == "__main__":
-#     # Standalone/local run: full backfill of the whole history.
-#     check_source()
-#     build_features()
-#     validate_output()
+if __name__ == "__main__":
+    # Standalone/local run: full backfill of the whole history.
+    check_source()
+    build_features()
+    validate_output()
