@@ -7,3 +7,5 @@ plugins/
 .env.*
 !.env.example
 __pycache__/
+certs/
+manifests/
