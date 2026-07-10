@@ -14,9 +14,8 @@ offline_store:
   db_schema: application
   user: ${POSTGRES_USER}
   password: ${POSTGRES_PASSWORD}
-  sslmode: require
+  sslmode: disable
 
 online_store:
   type: redis
   connection_string: ${REDIS_HOST}:${REDIS_PORT}
-  key_ttl_seconds: 604800

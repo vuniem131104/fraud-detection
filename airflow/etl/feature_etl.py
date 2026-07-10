@@ -259,8 +259,7 @@ def validate_output(start: str | datetime | None = None,
         raise ValueError(f"Coverage mismatch: {actual:,} feature rows vs {expected:,} transactions")
 
 
-if __name__ == "__main__":
-    # Standalone/local run: full backfill of the whole history.
-    check_source()
-    build_features()
-    validate_output()
+# if __name__ == "__main__":
+#     check_source()
+#     build_features()
+#     validate_output()
