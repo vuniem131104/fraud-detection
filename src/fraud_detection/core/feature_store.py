@@ -18,9 +18,19 @@ from structlog import get_logger
 
 logger = get_logger(__name__)
 
-# feature_store.py lives at src/fraud_detection/core/; the Feast repo
-# (feature_store.yaml) lives at src/feature_store/ from the project root.
 _DEFAULT_REPO_PATH = Path(__file__).resolve().parents[2] / "feature_store"
+
+_ONLINE_COLUMNS = [
+    "card_brand",
+    "card_type",
+    "is_virtual",
+    "customer_segment",
+    "kyc_level",
+    "email_verified",
+    "account_created_at",
+    "card_created_at",
+    "user_country",
+]
 
 
 class FeastFeatureStore:
@@ -33,15 +43,16 @@ class FeastFeatureStore:
 
     def __init__(
         self,
-        feature_columns: list[str],
         feature_view: str = "transaction_features",
         repo_path: str | None = None,
     ) -> None:
-        """Configure the store with the columns and Feast repo to read from.
+        """Configure the store with the Feast repo to read from.
+
+        The set of online columns is fixed (:data:`_ONLINE_COLUMNS`) — only the
+        slowly-changing entity attributes are materialised to Redis; every other
+        model feature is derived at request time in predict.py.
 
         Args:
-            feature_columns: Model feature column names (from the schema); each
-                is resolved to ``<feature_view>:<column>`` for the online read.
             feature_view: Name of the Feast feature view holding the columns.
             repo_path: Path to the Feast repo (dir containing
                 ``feature_store.yaml``). Defaults to ``$FEAST_REPO_PATH`` or the
@@ -49,7 +60,7 @@ class FeastFeatureStore:
         """
         self.repo_path = repo_path or os.getenv("FEAST_REPO_PATH") or str(_DEFAULT_REPO_PATH)
         self.feature_view = feature_view
-        self.feature_refs = [f"{feature_view}:{column}" for column in feature_columns]
+        self.feature_refs = [f"{feature_view}:{column}" for column in _ONLINE_COLUMNS]
         self.store: FeatureStore | None = None
 
     async def open(self) -> None:
