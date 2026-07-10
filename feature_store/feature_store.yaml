@@ -14,7 +14,7 @@ offline_store:
   db_schema: application
   user: ${POSTGRES_USER}
   password: ${POSTGRES_PASSWORD}
-  sslmode: disable
+  sslmode: require
 
 online_store:
   type: redis
