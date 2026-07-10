@@ -10,16 +10,19 @@ result to Kafka and returns the structured prediction.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
 import ssl
+from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Optional
 from uuid import uuid4
 
 import httpx
 from aiokafka import AIOKafkaProducer
+from redis import asyncio as aioredis
 from structlog import get_logger
 
 from database.postgres import PostgresDatabase
@@ -28,6 +31,73 @@ from fraud_detection.core.utils import build_model_inputs
 from fraud_detection.core.feature_store import FeastFeatureStore
 
 logger = get_logger(__name__)
+
+_VELOCITY_RETENTION_S = 25 * 3600  # 24h window + 1h buffer so it never evicts a window short
+_VELOCITY_AGG_TTL_S = 90 * 86400
+
+_LUA_CARD_VELOCITY = """
+-- KEYS[1]=card:transactions:{card_id}  KEYS[2]=card:declines:{card_id}  KEYS[3]=card:aggregate:{card_id}
+-- ARGV[1]=T (epoch seconds)  ARGV[2]=amount_usd  ARGV[3]=member "tx_id|amount"
+-- ARGV[4]=retention_s  ARGV[5]=agg_ttl_s
+local t = tonumber(ARGV[1])
+local ret = tonumber(ARGV[4])
+
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, t - ret)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], 0, t - ret)
+
+-- 1) read prior state (before appending the transaction being scored)
+local cnt_1h = redis.call('ZCOUNT', KEYS[1], t - 3600, t)
+local prior24 = redis.call('ZRANGEBYSCORE', KEYS[1], t - 86400, t)
+local cnt_24, sum_24 = #prior24, 0.0
+for _, m in ipairs(prior24) do
+  sum_24 = sum_24 + tonumber(string.sub(m, string.find(m, '|') + 1))
+end
+local declines_24 = redis.call('ZCOUNT', KEYS[2], t - 86400, t)
+local agg = redis.call('HMGET', KEYS[3], 'count_so_far', 'sum_so_far', 'sum_square', 'last_txn_at')
+
+-- 2) append this transaction — idempotent on member, so retries don't double-count
+if not redis.call('ZSCORE', KEYS[1], ARGV[3]) then
+  redis.call('ZADD', KEYS[1], t, ARGV[3])
+  redis.call('HINCRBY',      KEYS[3], 'count_so_far', 1)
+  redis.call('HINCRBYFLOAT', KEYS[3], 'sum_so_far',   ARGV[2])
+  redis.call('HINCRBYFLOAT', KEYS[3], 'sum_square',   tonumber(ARGV[2]) ^ 2)
+  redis.call('HSET',         KEYS[3], 'last_txn_at',  ARGV[1])
+end
+
+redis.call('EXPIRE', KEYS[1], ret)
+redis.call('EXPIRE', KEYS[2], ret)
+redis.call('EXPIRE', KEYS[3], tonumber(ARGV[5]))
+
+return {cnt_1h, cnt_24, tostring(sum_24), declines_24,
+        agg[1] or 0, agg[2] or '0', agg[3] or '0', agg[4] or false}
+"""
+
+_LUA_USER_VELOCITY = """
+-- KEYS[1]=user:transactions:{user_id}  KEYS[2]=user:aggregate:{user_id}
+-- ARGV[1]=T  ARGV[2]=amount_usd  ARGV[3]=member "tx_id|amount"
+-- ARGV[4]=retention_s  ARGV[5]=agg_ttl_s
+local t = tonumber(ARGV[1])
+local ret = tonumber(ARGV[4])
+
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, t - ret)
+
+local prior24 = redis.call('ZRANGEBYSCORE', KEYS[1], t - 86400, t)
+local cnt_24, sum_24 = #prior24, 0.0
+for _, m in ipairs(prior24) do
+  sum_24 = sum_24 + tonumber(string.sub(m, string.find(m, '|') + 1))
+end
+local last_txn_at = redis.call('HGET', KEYS[2], 'last_txn_at')
+
+if not redis.call('ZSCORE', KEYS[1], ARGV[3]) then
+  redis.call('ZADD', KEYS[1], t, ARGV[3])
+  redis.call('HSET', KEYS[2], 'last_txn_at', ARGV[1])
+end
+
+redis.call('EXPIRE', KEYS[1], ret)
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[5]))
+
+return {cnt_24, tostring(sum_24), last_txn_at or false}
+"""
 
 
 class FraudDetectionService:
@@ -43,7 +113,7 @@ class FraudDetectionService:
         schema: dict[str, Any],
         feature_store: FeastFeatureStore,
         database: PostgresDatabase,
-        threshold: float = 0.5,
+        redis_client: aioredis.Redis,
     ) -> None:
         """Initialize the service and its inference client configuration.
 
@@ -52,7 +122,6 @@ class FraudDetectionService:
                 categorical encoders.
             feature_store: Feast-backed online store for the model features.
             database: Postgres database used to persist feature snapshots.
-            threshold: Decision threshold above which a transaction is flagged.
 
         Raises:
             ValueError: If the ``KSERVE_URL`` environment variable is not set.
@@ -61,7 +130,33 @@ class FraudDetectionService:
         self.feature_columns: list[str] = schema["feature_columns"]
         self.feature_store = feature_store
         self.database = database
-        self.threshold = threshold
+        self.redis_client = redis_client
+        self.threshold = float(os.getenv("DECISION_THRESHOLD", "0.5"))
+        self.card_transactions_key = os.getenv("CARD_TRANSACTIONS_KEY", "")
+        self.card_aggregate_key = os.getenv("CARD_AGGREGATE_KEY", "")
+        self.card_declines_key = os.getenv("CARD_DECLINES_KEY", "")
+        self.user_transactions_key = os.getenv("USER_TRANSACTIONS_KEY", "")
+        self.user_aggregate_key = os.getenv("USER_AGGREGATE_KEY", "")
+        if not all([
+            self.card_transactions_key,
+            self.card_aggregate_key,
+            self.card_declines_key,
+            self.user_transactions_key,
+            self.user_aggregate_key,
+        ]):
+            logger.error(
+                "One or more Redis key environment variables are not set",
+                extra={
+                    "CARD_TRANSACTIONS_KEY": self.card_transactions_key,
+                    "CARD_AGGREGATE_KEY": self.card_aggregate_key,
+                    "CARD_DECLINES_KEY": self.card_declines_key,
+                    "USER_TRANSACTIONS_KEY": self.user_transactions_key,
+                    "USER_AGGREGATE_KEY": self.user_aggregate_key,
+                },
+            )
+            raise ValueError("One or more Redis key environment variables are not set")
+        self._card_velocity_script = self.redis_client.register_script(_LUA_CARD_VELOCITY)
+        self._user_velocity_script = self.redis_client.register_script(_LUA_USER_VELOCITY)
 
         self.kserve_url = os.getenv("KSERVE_URL", "")
         if not self.kserve_url:
@@ -90,6 +185,7 @@ class FraudDetectionService:
         """
         await self.database.open()
         await self.feature_store.open()
+        await self.redis_client.ping()
         await self.kserve_client.__aenter__()
         await self._start_producer()
         logger.info(
@@ -151,6 +247,7 @@ class FraudDetectionService:
         """
         await self.database.close()
         await self.feature_store.close()
+        await self.redis_client.close()
         await self.kserve_client.aclose()
         if self.producer:
             await self.producer.stop()
@@ -277,6 +374,8 @@ class FraudDetectionService:
         transaction_id = inputs.transaction_id
         user_id = inputs.user_id
         card_id = inputs.card_id
+        timestamp = inputs.timestamp
+        amount_usd = inputs.amount_usd
 
         operation_started_at = perf_counter()
         try:
@@ -290,7 +389,82 @@ class FraudDetectionService:
                 "No online features materialised for user-card pair",
                 extra={"user_id": user_id, "card_id": card_id, "transaction_id": transaction_id},
             )
+            
+        print(f"Feature before adding derived features: {features}")
+            
+        features["amount_usd"] = amount_usd
+        features["log_amount"] = math.log(1 + amount_usd)
 
+        created_at_utc = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(timezone.utc)
+        features["hour"] = created_at_utc.hour
+        features["weekday"] = created_at_utc.weekday()
+        features["is_night"] = int(features["hour"] < 6 or features["hour"] >= 23)
+        features["channel"] = inputs.channel
+        features["merchant_category"] = inputs.merchant_category
+        features["merchant_risk_level"] = inputs.merchant_risk_level
+        features["geo_mismatch"] = int(inputs.billing_country_code != inputs.ip_country_code)
+        features["foreign_ip"] = int(inputs.ip_country_code != features.get("user_country"))
+        features["recipient_differs"] = int(inputs.email_purchaser != inputs.email_recipient)
+        features["account_age_days"] = (created_at_utc - datetime.fromisoformat(
+            str(features.get("account_created_at")).replace("Z", "+00:00")
+        ).astimezone(timezone.utc)).days
+        features["card_age_days"] = (created_at_utc - datetime.fromisoformat(
+            str(features.get("card_created_at")).replace("Z", "+00:00")
+        ).astimezone(timezone.utc)).days
+
+        t_epoch = created_at_utc.timestamp()
+        member = f"{transaction_id}|{amount_usd}"
+        velocity_args = [f"{t_epoch:.6f}", str(amount_usd), member, _VELOCITY_RETENTION_S, _VELOCITY_AGG_TTL_S]
+
+        operation_started_at = perf_counter()
+        card_raw, user_raw = await asyncio.gather(
+            self._card_velocity_script(
+                keys=[
+                    f"{self.card_transactions_key}:{card_id}",
+                    f"{self.card_declines_key}:{card_id}",
+                    f"{self.card_aggregate_key}:{card_id}",
+                ],
+                args=velocity_args,
+            ),
+            self._user_velocity_script(
+                keys=[
+                    f"{self.user_transactions_key}:{user_id}",
+                    f"{self.user_aggregate_key}:{user_id}",
+                ],
+                args=velocity_args,
+            ),
+        )
+        log_time_perf("fetch_velocity_features", operation_started_at)
+
+        cnt_1h, cnt_24h, sum_24h, declines_24h, n, s, ss, last_txn_at = card_raw
+        u_cnt_24h, u_sum_24h, u_last_txn_at = user_raw
+        n = int(n)
+
+        if n < 2:
+            zscore = math.nan
+        else:
+            s, ss = float(s), float(ss)
+            mean = s / n
+            variance = (ss - s * s / n) / (n - 1)
+            zscore = math.nan if variance <= 0 else (amount_usd - mean) / math.sqrt(variance)
+
+        features["card_tx_count_1h"] = cnt_1h + 1
+        features["card_tx_count_24h"] = cnt_24h + 1
+        features["card_amount_sum_24h"] = float(sum_24h) + amount_usd
+        features["card_seconds_since_last_tx"] = (
+            (t_epoch - float(last_txn_at)) if last_txn_at else math.nan
+        )
+        features["card_amount_zscore"] = zscore
+        features["card_tx_seq"] = n + 1
+        features["card_declines_24h"] = declines_24h
+        features["user_tx_count_24h"] = u_cnt_24h + 1
+        features["user_amount_sum_24h"] = float(u_sum_24h) + amount_usd
+        features["user_seconds_since_last_tx"] = (
+            (t_epoch - float(u_last_txn_at)) if u_last_txn_at else math.nan
+        )
+        
+        print(f"Feature after adding derived features: {features}")
+        
         operation_started_at = perf_counter()
         encoded = build_model_inputs(features, self.schema)
         vector = [encoded[column] for column in self.feature_columns]
@@ -303,10 +477,6 @@ class FraudDetectionService:
         prediction = 1 if probability >= self.threshold else 0
         latency = round((perf_counter() - predict_started_at) * 1000, 3)
 
-        # Persisting to prediction_logs is temporarily disabled: the database is
-        # remote (GCP Cloud SQL via proxy), so awaiting the insert adds ~400ms of
-        # WAN round-trip to every request. Re-enable (or move to a fire-and-forget
-        # task / the Kafka -> writer path) when persistence is needed.
         # try:
         #     await self.database.execute(
         #         """

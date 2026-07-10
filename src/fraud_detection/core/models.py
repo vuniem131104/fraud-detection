@@ -6,7 +6,7 @@ Feast online store rather than sent in the request. ``FraudDetectionOutputs``
 is the scoring result returned to the caller.
 """
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, EmailStr
 
 
 class FraudDetectionInputs(BaseModel):
@@ -21,6 +21,15 @@ class FraudDetectionInputs(BaseModel):
     transaction_id: str = Field(min_length=1)
     user_id: str = Field(min_length=1)
     card_id: str = Field(min_length=1)
+    merchant_category: str = Field(min_length=1)
+    merchant_risk_level: int = Field(ge=0, le=10)
+    amount_usd: float = Field(gt=0.0)
+    timestamp: str = Field(min_length=1)
+    channel: str = Field(min_length=1)
+    billing_country_code: str = Field(min_length=1)
+    ip_country_code: str = Field(min_length=1)
+    email_purchaser: EmailStr = Field(...)
+    email_recipient: EmailStr = Field(...)
 
 
 class FraudDetectionOutputs(BaseModel):
