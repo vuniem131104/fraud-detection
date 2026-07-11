@@ -22,7 +22,8 @@ with DAG(
     dag_id="feature_pipeline",
     start_date=datetime(2026, 7, 2),
     schedule="@daily",
-    catchup=False,
+    catchup=True,
+    max_active_runs=1,
     default_args=default_args,
     tags=["features", "etl"],
 ) as dag:
