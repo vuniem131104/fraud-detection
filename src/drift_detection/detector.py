@@ -1,11 +1,11 @@
-"""Drift detector for TransactionAmt using KS test + PSI."""
+"""Drift detector for the ``amount_usd`` column using the Population Stability Index (PSI)."""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-COLUMN = "TransactionAmt"
+COLUMN = "amount_usd"
 DEFAULT_THRESHOLD = 0.1
 
 # PSI thresholds (industry standard)
@@ -66,7 +66,7 @@ def _psi_label(psi: float) -> str:
 
 
 class DriftDetector:
-    """Loads the baseline once and runs KS + PSI drift detection on demand."""
+    """Loads the baseline once and runs PSI drift detection on the ``amount_usd`` column on demand."""
 
     def __init__(self, baseline_df: pd.DataFrame, threshold: float = DEFAULT_THRESHOLD) -> None:
         self._baseline = baseline_df[COLUMN].dropna().to_numpy(dtype=float)
@@ -86,21 +86,29 @@ class DriftDetector:
     def baseline_rows(self) -> int:
         return len(self._baseline)
 
-    def detect(self, amounts: list[float]) -> dict:
-        """Run PSI between baseline and current window.
+    def detect(self, amounts: list[float], threshold: float | None = None) -> dict:
+        """Run PSI between the training baseline and the current ``amount_usd`` window.
 
-        Returns a plain dict ready for JSON serialisation.
+        Args:
+            amounts:   Current-window ``amount_usd`` values to compare against the baseline.
+            threshold: PSI cut-off above which drift is flagged. Falls back to the
+                       detector's configured threshold when ``None``.
+
+        Returns:
+            A plain dict ready for JSON serialisation.
         """
         current = np.array(amounts, dtype=float)
+        cutoff = self._threshold if threshold is None else threshold
 
         psi = _compute_psi(self._baseline, current)
-        drift_detected = psi >= PSI_THRESHOLD_LOW
+        drift_detected = psi >= cutoff
 
         return {
             "column": COLUMN,
             "drift_detected": bool(drift_detected),
             "psi": psi,
             "psi_label": _psi_label(psi),
+            "threshold": cutoff,
             "n_current": len(amounts),
             "current_mean": round(float(np.mean(current)), 4),
             "current_std": round(float(np.std(current, ddof=1)), 4),
