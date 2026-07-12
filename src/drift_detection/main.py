@@ -30,7 +30,7 @@ structlog.configure(
 logger = structlog.get_logger(__name__)
 
 # Repo layout: src/drift_detection/main.py → parents[2] is the repo root.
-DEFAULT_BASELINE_PATH = Path(__file__).resolve().parents[2] / "datase" / "training_data.parquet"
+DEFAULT_BASELINE_PATH = Path(__file__).resolve().parents[2] / "dataset" / "training_data.parquet"
 BASELINE_DATA_PATH = os.getenv("BASELINE_DATA_PATH", str(DEFAULT_BASELINE_PATH))
 
 

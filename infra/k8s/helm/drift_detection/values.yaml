@@ -10,7 +10,7 @@ api:
       maxSurge: 1
   image:
     repository: us-central1-docker.pkg.dev/project-57f7ef9a-6059-4068-ae7/fraud-detection/drift-detection-api
-    tag: "rollout"
+    tag: "latest"
     pullPolicy: Always
   port: 8001
   resources:

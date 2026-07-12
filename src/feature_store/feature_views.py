@@ -9,7 +9,7 @@ from entities import user, card
 transaction_features = FeatureView(
     name="transaction_features",
     entities=[user, card],
-    ttl=timedelta(0),
+    ttl=timedelta(0),  # Set infinite ttl since we want to keep all the data in the online store
     source=transaction_source,
     schema=[
         Field(name="card_brand", dtype=String),

@@ -32,8 +32,8 @@ from fraud_detection.core.feature_store import FeastFeatureStore
 
 logger = get_logger(__name__)
 
-_VELOCITY_RETENTION_S = 25 * 3600
-_VELOCITY_AGG_TTL_S = 90 * 86400
+_VELOCITY_RETENTION_S = 25 * 3600 # we choose 25h to capture 24h + 1h buffer
+_VELOCITY_AGG_TTL_S = 90 * 86400 # we choose 90 days to keep the historical data for 3 monthes. Any user having no activity in 90 days will be cleaned up
 
 _LUA_CARD_VELOCITY = """
 -- KEYS[1]=card:transactions:{card_id}  KEYS[2]=card:declines:{card_id}  KEYS[3]=card:aggregate:{card_id}

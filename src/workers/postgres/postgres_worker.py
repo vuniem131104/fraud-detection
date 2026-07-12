@@ -10,6 +10,7 @@ environment variables and runs it.
 
 import asyncio
 import os
+from datetime import datetime
 from typing import Any
 
 from database.postgres import PostgresDatabase
@@ -81,7 +82,7 @@ class PredictionWriter(BaseKafkaWorker):
         to stay idempotent.
 
         Args:
-            msg: Flat decoded message with keys such as ``transaction_id``,
+            msg: Flat decoded message with keys such as ``id``,
                 ``user_id``, ``card_id``, ``amount_usd``, ``channel``,
                 ``billing_country_code``, ``ip_country_code``,
                 ``email_purchaser``, ``email_recipient``, ``status``,
@@ -99,7 +100,7 @@ class PredictionWriter(BaseKafkaWorker):
             await self.database.execute(
                 """
                 INSERT INTO application.transactions (
-                    transaction_id, user_id, card_id,
+                    id, user_id, card_id,
                     merchant_id, device_id,
                     amount_usd, currency, channel,
                     billing_country_code, ip_country_code,
@@ -114,7 +115,7 @@ class PredictionWriter(BaseKafkaWorker):
                     $11, $12,
                     $13, $14
                 )
-                ON CONFLICT (transaction_id) DO NOTHING
+                ON CONFLICT (id) DO NOTHING
                 """,
                 (
                     transaction_id,
@@ -130,7 +131,7 @@ class PredictionWriter(BaseKafkaWorker):
                     msg.get("email_purchaser"),
                     msg.get("email_recipient"),
                     msg.get("status"),
-                    msg.get("transaction_time"),
+                    datetime.fromisoformat(msg["transaction_time"]) if msg.get("transaction_time") else None,
                 ),
             )
             logger.info("Saved transaction", extra={"transaction_id": transaction_id})
@@ -147,6 +148,7 @@ class PredictionWriter(BaseKafkaWorker):
                     fraud_score, prediction, threshold, latency_ms
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (transaction_id) DO NOTHING
                 """,
                 (
                     transaction_id,
