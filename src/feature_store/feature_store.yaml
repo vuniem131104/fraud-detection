@@ -19,3 +19,4 @@ offline_store:
 online_store:
   type: redis
   connection_string: ${REDIS_HOST}:${REDIS_PORT}
+  # we dont set TTL here because each feature in redis changes infreqently 
