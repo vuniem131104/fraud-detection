@@ -9,7 +9,7 @@ api:
       maxUnavailable: 0
       maxSurge: 1
   image:
-    repository: us-central1-docker.pkg.dev/project-8f21156c-3434-4d17-a8c/fraud-detection/drift-detection-api
+    repository: us-central1-docker.pkg.dev/project-57f7ef9a-6059-4068-ae7/fraud-detection/drift-detection-api
     tag: "latest"
     pullPolicy: Always
   port: 8001
@@ -34,7 +34,7 @@ cloudSqlProxy:
 
 serviceAccount:
   name: drift-detection-api-sa
-  gcpServiceAccount: "drift-detection-api-sa@project-8f21156c-3434-4d17-a8c.iam.gserviceaccount.com"
+  gcpServiceAccount: "drift-detection-api-sa@project-57f7ef9a-6059-4068-ae7.iam.gserviceaccount.com"
 
 service:
   type: ClusterIP

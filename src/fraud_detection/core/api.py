@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     fraud_detection_service: FraudDetectionService | None = None
 
     try:
-        feature_store = FeastFeatureStore()
+        feature_store = FeastFeatureStore(repo_path='/app/src/feature_store')
         app.state.database = database
         app.state.redis_client = redis_client
         fraud_detection_service = FraudDetectionService(

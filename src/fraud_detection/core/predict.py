@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Optional
 from uuid import uuid4
-
+import random
 import httpx
 from aiokafka import AIOKafkaProducer
 from redis import asyncio as aioredis
@@ -32,7 +32,7 @@ from fraud_detection.core.feature_store import FeastFeatureStore
 
 logger = get_logger(__name__)
 
-_VELOCITY_RETENTION_S = 25 * 3600  # 24h window + 1h buffer so it never evicts a window short
+_VELOCITY_RETENTION_S = 25 * 3600
 _VELOCITY_AGG_TTL_S = 90 * 86400
 
 _LUA_CARD_VELOCITY = """
@@ -131,7 +131,7 @@ class FraudDetectionService:
         self.feature_store = feature_store
         self.database = database
         self.redis_client = redis_client
-        self.threshold = float(os.getenv("DECISION_THRESHOLD", "0.5"))
+        self.threshold = float(os.getenv("DECISION_THRESHOLD", "0.8"))
         self.card_transactions_key = os.getenv("CARD_TRANSACTIONS_KEY", "")
         self.card_aggregate_key = os.getenv("CARD_AGGREGATE_KEY", "")
         self.card_declines_key = os.getenv("CARD_DECLINES_KEY", "")
@@ -190,20 +190,15 @@ class FraudDetectionService:
         await self._start_producer()
         logger.info(
             "FraudDetectionService is ready",
-            extra={"kafka_enabled": self.producer is not None},
         )
 
     async def _start_producer(self) -> None:
         """Start the Kafka producer if enabled, tolerating failures for local runs.
 
-        Skips startup when ``KAFKA_ENABLED`` is falsy or ``BOOTSTRAP_SERVERS`` is
-        unset. Uses an SSL context only when the security protocol requires it,
+        Uses an SSL context only when the security protocol requires it,
         so a local PLAINTEXT broker needs no certificates. Any startup failure is
         logged and leaves the producer disabled rather than aborting the service.
         """
-        if os.getenv("KAFKA_ENABLED", "true").strip().lower() not in ("1", "true", "yes"):
-            logger.info("Kafka publishing disabled; skipping producer startup")
-            return
 
         bootstrap_servers = os.getenv("BOOTSTRAP_SERVERS")
         if not bootstrap_servers:
@@ -247,7 +242,7 @@ class FraudDetectionService:
         """
         await self.database.close()
         await self.feature_store.close()
-        await self.redis_client.close()
+        await self.redis_client.aclose()
         await self.kserve_client.aclose()
         if self.producer:
             await self.producer.stop()
@@ -363,11 +358,9 @@ class FraudDetectionService:
         def log_time_perf(operation: str, started_at: float) -> None:
             """Log the elapsed time of ``operation`` since ``started_at`` in milliseconds."""
             logger.info(
-                "Prediction step timing",
+                operation,
                 extra={
-                    "operation": operation,
                     "elapsed_ms": round((perf_counter() - started_at) * 1000, 3),
-                    "transaction_id": transaction_id,
                 },
             )
 
@@ -376,141 +369,118 @@ class FraudDetectionService:
         card_id = inputs.card_id
         timestamp = inputs.timestamp
         amount_usd = inputs.amount_usd
+        # randomly create status (approved or declined)
+        status = "approved" if random.random() < 0.99 else "declined"
 
         operation_started_at = perf_counter()
         try:
             features = await self.feature_store.get_online_features(user_id, card_id)
         except Exception as exc:
             raise RuntimeError("Failed to read online features for prediction") from exc
-        log_time_perf("fetch_online_features", operation_started_at)
+        log_time_perf("Fetch online features", operation_started_at)
 
         if all(features.get(column) is None for column in self.feature_columns):
             logger.warning(
                 "No online features materialised for user-card pair",
                 extra={"user_id": user_id, "card_id": card_id, "transaction_id": transaction_id},
             )
-            
-        print(f"Feature before adding derived features: {features}")
-            
-        features["amount_usd"] = amount_usd
-        features["log_amount"] = math.log(1 + amount_usd)
 
-        created_at_utc = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(timezone.utc)
-        features["hour"] = created_at_utc.hour
-        features["weekday"] = created_at_utc.weekday()
-        features["is_night"] = int(features["hour"] < 6 or features["hour"] >= 23)
-        features["channel"] = inputs.channel
-        features["merchant_category"] = inputs.merchant_category
-        features["merchant_risk_level"] = inputs.merchant_risk_level
-        features["geo_mismatch"] = int(inputs.billing_country_code != inputs.ip_country_code)
-        features["foreign_ip"] = int(inputs.ip_country_code != features.get("user_country"))
-        features["recipient_differs"] = int(inputs.email_purchaser != inputs.email_recipient)
-        features["account_age_days"] = (created_at_utc - datetime.fromisoformat(
-            str(features.get("account_created_at")).replace("Z", "+00:00")
-        ).astimezone(timezone.utc)).days
-        features["card_age_days"] = (created_at_utc - datetime.fromisoformat(
-            str(features.get("card_created_at")).replace("Z", "+00:00")
-        ).astimezone(timezone.utc)).days
+        operation_started_at = perf_counter()    
+        try:
+            features["amount_usd"] = amount_usd
+            features["log_amount"] = math.log(1 + amount_usd)
 
-        t_epoch = created_at_utc.timestamp()
-        member = f"{transaction_id}|{amount_usd}"
-        velocity_args = [f"{t_epoch:.6f}", str(amount_usd), member, _VELOCITY_RETENTION_S, _VELOCITY_AGG_TTL_S]
+            created_at_utc = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(timezone.utc)
+            features["hour"] = created_at_utc.hour
+            features["weekday"] = created_at_utc.weekday()
+            features["is_night"] = int(features["hour"] < 6 or features["hour"] >= 23)
+            features["channel"] = inputs.channel
+            features["merchant_category"] = inputs.merchant_category
+            features["merchant_risk_level"] = inputs.merchant_risk_level
+            features["geo_mismatch"] = int(inputs.billing_country_code != inputs.ip_country_code)
+            features["foreign_ip"] = int(inputs.ip_country_code != features.get("user_country"))
+            features["recipient_differs"] = int(inputs.email_purchaser != inputs.email_recipient)
+            features["account_age_days"] = (created_at_utc - datetime.fromisoformat(
+                str(features.get("account_created_at")).replace("Z", "+00:00")
+            ).astimezone(timezone.utc)).days
+            features["card_age_days"] = (created_at_utc - datetime.fromisoformat(
+                str(features.get("card_created_at")).replace("Z", "+00:00")
+            ).astimezone(timezone.utc)).days
 
-        operation_started_at = perf_counter()
-        card_raw, user_raw = await asyncio.gather(
-            self._card_velocity_script(
-                keys=[
-                    f"{self.card_transactions_key}:{card_id}",
-                    f"{self.card_declines_key}:{card_id}",
-                    f"{self.card_aggregate_key}:{card_id}",
-                ],
-                args=velocity_args,
-            ),
-            self._user_velocity_script(
-                keys=[
-                    f"{self.user_transactions_key}:{user_id}",
-                    f"{self.user_aggregate_key}:{user_id}",
-                ],
-                args=velocity_args,
-            ),
-        )
-        log_time_perf("fetch_velocity_features", operation_started_at)
+            t_epoch = created_at_utc.timestamp()
+            member = f"{transaction_id}|{amount_usd}"
+            velocity_args = [f"{t_epoch:.6f}", str(amount_usd), member, _VELOCITY_RETENTION_S, _VELOCITY_AGG_TTL_S]
 
-        cnt_1h, cnt_24h, sum_24h, declines_24h, n, s, ss, last_txn_at = card_raw
-        u_cnt_24h, u_sum_24h, u_last_txn_at = user_raw
-        n = int(n)
+            card_raw, user_raw = await asyncio.gather(
+                self._card_velocity_script(
+                    keys=[
+                        f"{self.card_transactions_key}:{card_id}",
+                        f"{self.card_declines_key}:{card_id}",
+                        f"{self.card_aggregate_key}:{card_id}",
+                    ],
+                    args=velocity_args,
+                ),
+                self._user_velocity_script(
+                    keys=[
+                        f"{self.user_transactions_key}:{user_id}",
+                        f"{self.user_aggregate_key}:{user_id}",
+                    ],
+                    args=velocity_args,
+                ),
+            )
 
-        if n < 2:
-            zscore = math.nan
-        else:
-            s, ss = float(s), float(ss)
-            mean = s / n
-            variance = (ss - s * s / n) / (n - 1)
-            zscore = math.nan if variance <= 0 else (amount_usd - mean) / math.sqrt(variance)
+            cnt_1h, cnt_24h, sum_24h, declines_24h, n, s, ss, last_txn_at = card_raw
+            u_cnt_24h, u_sum_24h, u_last_txn_at = user_raw
+            n = int(n)
 
-        features["card_tx_count_1h"] = cnt_1h + 1
-        features["card_tx_count_24h"] = cnt_24h + 1
-        features["card_amount_sum_24h"] = float(sum_24h) + amount_usd
-        features["card_seconds_since_last_tx"] = (
-            (t_epoch - float(last_txn_at)) if last_txn_at else math.nan
-        )
-        features["card_amount_zscore"] = zscore
-        features["card_tx_seq"] = n + 1
-        features["card_declines_24h"] = declines_24h
-        features["user_tx_count_24h"] = u_cnt_24h + 1
-        features["user_amount_sum_24h"] = float(u_sum_24h) + amount_usd
-        features["user_seconds_since_last_tx"] = (
-            (t_epoch - float(u_last_txn_at)) if u_last_txn_at else math.nan
-        )
+            if n < 2:
+                zscore = math.nan
+            else:
+                s, ss = float(s), float(ss)
+                mean = s / n
+                variance = (ss - s * s / n) / (n - 1)
+                zscore = math.nan if variance <= 0 else (amount_usd - mean) / math.sqrt(variance)
+
+            features["card_tx_count_1h"] = cnt_1h + 1
+            features["card_tx_count_24h"] = cnt_24h + 1
+            features["card_amount_sum_24h"] = float(sum_24h) + amount_usd
+            features["card_seconds_since_last_tx"] = (
+                (t_epoch - float(last_txn_at)) if last_txn_at else math.nan
+            )
+            features["card_amount_zscore"] = zscore
+            features["card_tx_seq"] = n + 1
+            features["card_declines_24h"] = declines_24h
+            features["user_tx_count_24h"] = u_cnt_24h + 1
+            features["user_amount_sum_24h"] = float(u_sum_24h) + amount_usd
+            features["user_seconds_since_last_tx"] = (
+                (t_epoch - float(u_last_txn_at)) if u_last_txn_at else math.nan
+            )
+        except Exception as exc:
+            logger.exception("Failed to calculate derived features", extra={"transaction_id": transaction_id})
+            raise RuntimeError("Failed to calculate derived features") from exc
+        log_time_perf("Calculate derived features", operation_started_at)
+
+        print(f"Full feature: {json.dumps(features, indent=4, default=str)}")
         
-        print(f"Feature after adding derived features: {features}")
-        
         operation_started_at = perf_counter()
-        encoded = build_model_inputs(features, self.schema)
-        vector = [encoded[column] for column in self.feature_columns]
-        log_time_perf("build_model_inputs", operation_started_at)
+        try:
+            encoded = build_model_inputs(features, self.schema)
+            vector = [encoded[column] for column in self.feature_columns]
+        except Exception as exc:
+            logger.exception("Failed to build model inputs", extra={"transaction_id": transaction_id})
+            raise RuntimeError("Failed to build model inputs") from exc
+        log_time_perf("Build model inputs", operation_started_at)
 
         operation_started_at = perf_counter()
-        probability = await self.predict_with_kserve(vector)
-        log_time_perf("kserve_inference", operation_started_at)
+        try:
+            probability = await self.predict_with_kserve(vector)
+        except Exception as exc:
+            logger.exception("Failed to run inference", extra={"transaction_id": transaction_id})
+            raise RuntimeError("Failed to run inference") from exc
+        log_time_perf("KServe inference", operation_started_at)
 
         prediction = 1 if probability >= self.threshold else 0
         latency = round((perf_counter() - predict_started_at) * 1000, 3)
-
-        # try:
-        #     await self.database.execute(
-        #         """
-        #         INSERT INTO application.prediction_logs (
-        #             transaction_id, model_name, model_version,
-        #             fraud_score, prediction, threshold, latency_ms
-        #         )
-        #         VALUES ($1, $2, $3, $4, $5, $6, $7)
-        #         """,
-        #         (
-        #             transaction_id,
-        #             os.getenv("MODEL_NAME"),
-        #             os.getenv("MODEL_VERSION"),
-        #             probability,
-        #             prediction,
-        #             self.threshold,
-        #             latency,
-        #         ),
-        #     )
-        #     logger.info("Saved prediction log", extra={"transaction_id": transaction_id})
-        # except Exception:
-        #     logger.exception("Failed to save prediction log", extra={"transaction_id": transaction_id})
-
-        logger.info(
-            "Finished fraud prediction",
-            extra={
-                "request_id": request_id,
-                "transaction_id": transaction_id,
-                "probability": probability,
-                "prediction": prediction,
-                "latency": latency,
-                "latency_unit": "milliseconds",
-            },
-        )
 
         if self.producer is not None:
             try:
@@ -521,6 +491,17 @@ class FraudDetectionService:
                         "transaction_id": transaction_id,
                         "user_id": user_id,
                         "card_id": card_id,
+                        "merchant_id": "892f2f376b8d48dcad990996e23f37c0", # hard coded here because it is not much important for now
+                        "device_id": "f63be9e313d44d3d990f96e50e0465b3", # hard coded here because it is not much important for now
+                        "amount_usd": amount_usd,
+                        "currency": "VND", # hard coded here because it is not much important for now
+                        "channel": inputs.channel,
+                        "billing_country_code": inputs.billing_country_code,
+                        "ip_country_code": inputs.ip_country_code,
+                        "email_purchaser": inputs.email_purchaser,
+                        "email_recipient": inputs.email_recipient,
+                        "status": status,
+                        "transaction_time": timestamp,
                         "fraud_score": probability,
                         "prediction": prediction,
                         "latency_ms": latency,
@@ -544,7 +525,18 @@ class FraudDetectionService:
                     },
                 )
 
-        log_time_perf("predict_total", predict_started_at)
+        logger.info(
+            "Finished fraud prediction",
+            extra={
+                "request_id": request_id,
+                "transaction_id": transaction_id,
+                "probability": probability,
+                "prediction": prediction,
+                "latency": latency,
+                "latency_unit": "milliseconds",
+            },
+        )
+
         return FraudDetectionOutputs(
             transaction_id=transaction_id,
             probability=probability,
