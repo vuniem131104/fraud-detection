@@ -58,7 +58,7 @@ class FeastFeatureStore:
                 ``feature_store.yaml``). Defaults to ``$FEAST_REPO_PATH`` or the
                 project's ``src/feature_store``.
         """
-        self.repo_path = repo_path or os.getenv("FEAST_REPO_PATH") or str(_DEFAULT_REPO_PATH)
+        self.repo_path = repo_path
         self.feature_view = feature_view
         self.feature_refs = [f"{feature_view}:{column}" for column in _ONLINE_COLUMNS]
         self.store: FeatureStore | None = None

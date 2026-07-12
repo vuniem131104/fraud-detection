@@ -16,15 +16,9 @@ from database.postgres import PostgresDatabase
 from structlog import get_logger
 
 from workers.base_worker import BaseKafkaWorker
-from utils import parse_datetime
 
 logger = get_logger(__name__)
 
-CHANNEL_MAP = {
-    "W": "web",
-    "C": "mobile_app",
-    "R": "pos",
-}
 
 
 class PredictionWriter(BaseKafkaWorker):
@@ -76,66 +70,72 @@ class PredictionWriter(BaseKafkaWorker):
     async def handle(self, msg: dict[str, Any]) -> None:
         """Persist one scored transaction message to Postgres.
 
-        Inserts the transaction into ``application.transactions`` (mapping the
-        raw channel code via :data:`CHANNEL_MAP` and parsing the event
-        timestamp) and the model output into ``application.prediction_logs``.
-        The transaction insert uses ``ON CONFLICT (id) DO NOTHING`` to stay
-        idempotent.
+        Reads fields from the flat Kafka message produced by
+        :class:`~fraud_detection.core.predict.FraudDetectionService` and
+        inserts them into two tables:
+
+        * ``application.transactions`` – core transaction details.
+        * ``application.prediction_logs`` – model fraud score and verdict.
+
+        The ``transactions`` insert uses ``ON CONFLICT (transaction_id) DO NOTHING``
+        to stay idempotent.
 
         Args:
-            msg: Decoded message containing ``current_transaction`` plus the
-                model name/version, fraud score, prediction, threshold and
-                latency.
+            msg: Flat decoded message with keys such as ``transaction_id``,
+                ``user_id``, ``card_id``, ``amount_usd``, ``channel``,
+                ``billing_country_code``, ``ip_country_code``,
+                ``email_purchaser``, ``email_recipient``, ``status``,
+                ``transaction_time``, ``fraud_score``, ``prediction``,
+                ``threshold``, ``latency_ms``, ``model_name``,
+                ``model_version``.
 
         Raises:
             Exception: Re-raised after logging if either insert fails.
         """
-        tx = msg.get("current_transaction", {})
-        tx_id = tx.get("tx_id") or tx.get("tx_id")
+        transaction_id = msg.get("transaction_id")
 
         # ── 1. transactions ──────────────────────────────────────────────────
         try:
             await self.database.execute(
                 """
                 INSERT INTO application.transactions (
-                    id, user_id, card_id,
-                    amount_usd, channel,
-                    billing_zone, billing_country,
+                    transaction_id, user_id, card_id,
+                    merchant_id, device_id,
+                    amount_usd, currency, channel,
+                    billing_country_code, ip_country_code,
                     email_purchaser, email_recipient,
-                    device_info, device_type, os_raw, browser_raw,
-                    screen_resolution, created_at
+                    status, created_at
                 )
                 VALUES (
                     $1, $2, $3,
                     $4, $5,
-                    $6, $7,
-                    $8, $9,
-                    $10, $11, $12, $13,
-                    $14, $15
+                    $6, $7, $8,
+                    $9, $10,
+                    $11, $12,
+                    $13, $14
                 )
-                ON CONFLICT (id) DO NOTHING
+                ON CONFLICT (transaction_id) DO NOTHING
                 """,
                 (
-                    tx_id,
-                    tx["user_id"],
-                    tx["card_id"],
-                    float(tx["amount_usd"]),
-                    CHANNEL_MAP.get(tx.get("channel", ""), tx.get("channel")),
-                    int(tx["billing_zone"]),
-                    int(tx["billing_country"]),
-                    tx.get("email_purchaser"),
-                    tx.get("email_recipient"),
-                    tx.get("device_info"),
-                    tx.get("device_type"),
-                    tx.get("os_raw"),
-                    tx.get("browser_raw"),
-                    tx.get("screen_resolution"),
-                    parse_datetime(tx["event_timestamp"]),
+                    transaction_id,
+                    msg.get("user_id"),
+                    msg.get("card_id"),
+                    msg.get("merchant_id"),
+                    msg.get("device_id"),
+                    float(msg["amount_usd"]),
+                    msg.get("currency"),
+                    msg.get("channel"),
+                    msg.get("billing_country_code"),
+                    msg.get("ip_country_code"),
+                    msg.get("email_purchaser"),
+                    msg.get("email_recipient"),
+                    msg.get("status"),
+                    msg.get("transaction_time"),
                 ),
             )
-            logger.info("Saved transaction", extra={"tx_id": tx_id})
+            logger.info("Saved transaction", extra={"transaction_id": transaction_id})
         except Exception:
-            logger.exception("Failed to save transaction", extra={"tx_id": tx_id})
+            logger.exception("Failed to save transaction", extra={"transaction_id": transaction_id})
             raise
 
         # ── 2. prediction_logs ───────────────────────────────────────────────
@@ -149,7 +149,7 @@ class PredictionWriter(BaseKafkaWorker):
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                 """,
                 (
-                    tx_id,
+                    transaction_id,
                     msg.get("model_name"),
                     msg.get("model_version"),
                     float(msg["fraud_score"]),
@@ -158,9 +158,9 @@ class PredictionWriter(BaseKafkaWorker):
                     float(msg.get("latency_ms") or 0.0),
                 ),
             )
-            logger.info("Saved prediction log", extra={"tx_id": tx_id})
+            logger.info("Saved prediction log", extra={"transaction_id": transaction_id})
         except Exception:
-            logger.exception("Failed to save prediction log", extra={"tx_id": tx_id})
+            logger.exception("Failed to save prediction log", extra={"transaction_id": transaction_id})
             raise
 
 

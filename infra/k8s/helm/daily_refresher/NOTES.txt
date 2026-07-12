@@ -1,4 +1,0 @@
-Daily refresh CronJob:
-  name: {{ .Values.dailyRefresh.name }}
-  namespace: {{ .Values.namespace }}
-  schedule: {{ .Values.dailyRefresh.schedule }}
