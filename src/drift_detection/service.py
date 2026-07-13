@@ -1,10 +1,10 @@
 """Drift detection service orchestrating baseline loading and current-window scoring.
 
 Defines :class:`DriftDetectionService`, which owns the connection to Postgres and
-the in-memory PSI :class:`DriftDetector` built from the training baseline. On each
-request it queries the last 30 days of ``amount_usd`` from Postgres and runs a PSI
-drift test against the baseline. Lifecycle is managed via :meth:`open` / :meth:`close`,
-mirroring the ``fraud_detection`` service.
+the in-memory :class:`DriftDetector` built from the training baseline. On each
+request it queries the last 30 days of ``amount_usd`` from Postgres and runs a
+Wasserstein drift test against the baseline. Lifecycle is managed via :meth:`open` /
+:meth:`close`, mirroring the ``fraud_detection`` service.
 """
 
 from __future__ import annotations
@@ -18,12 +18,12 @@ from drift_detection.repository import fetch_amounts_last_30_days
 
 logger = get_logger(__name__)
 
-# Minimum current-window rows required for a statistically meaningful PSI.
+# Minimum current-window rows required for a statistically meaningful drift test.
 MIN_CURRENT_ROWS = 30
 
 
 class InsufficientDataError(Exception):
-    """Raised when the current window has too few rows for a reliable PSI."""
+    """Raised when the current window has too few rows for a reliable drift test."""
 
     def __init__(self, found: int, required: int = MIN_CURRENT_ROWS) -> None:
         self.found = found
@@ -36,7 +36,7 @@ class InsufficientDataError(Exception):
 class DriftDetectionService:
     """Coordinates baseline loading and current-window drift scoring.
 
-    Holds the long-lived Postgres pool and the PSI detector built from the training
+    Holds the long-lived Postgres pool and the drift detector built from the training
     baseline (``amount_usd``). Lifecycle is managed via :meth:`open` and :meth:`close`.
     """
 
@@ -59,7 +59,7 @@ class DriftDetectionService:
         self._detector: DriftDetector | None = None
 
     async def open(self) -> None:
-        """Open the database pool and build the PSI detector from the training baseline."""
+        """Open the database pool and build the drift detector from the training baseline."""
         await self.database.open()
         baseline_df = pd.read_parquet(self.baseline_path, columns=[COLUMN])
         self._detector = DriftDetector(baseline_df, threshold=self.threshold)
@@ -83,13 +83,13 @@ class DriftDetectionService:
         return self._detector.baseline_rows if self._detector is not None else 0
 
     async def detect(self, threshold: float | None = None) -> dict:
-        """Query the last 30 days of ``amount_usd`` from Postgres and run the PSI drift test.
+        """Query the last 30 days of ``amount_usd`` from Postgres and run the Wasserstein drift test.
 
         Args:
-            threshold: Optional PSI cut-off overriding the service default for this call.
+            threshold: Optional Wasserstein cut-off overriding the service default for this call.
 
         Returns:
-            The PSI drift result dict produced by :class:`DriftDetector`.
+            The drift result dict produced by :class:`DriftDetector`.
 
         Raises:
             RuntimeError: If the service has not been opened.

@@ -18,8 +18,8 @@ serviceAccount:
   gcpServiceAccount: "loki-sa@project-57f7ef9a-6059-4068-ae7.iam.gserviceaccount.com"
 
 storage:
-  gcsBucket: fraud-detection-chunks
-  rulerBucket: fraud-detection-ruler
+  gcsBucket: fraud-detection-chunkss
+  rulerBucket: fraud-detection-rulerss
 
 config:
   schemaFrom: "2024-04-01"

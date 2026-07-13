@@ -6,9 +6,14 @@ metadata:
     autoscaling.knative.dev/min-scale: "{{ .Values.autoscaling.minReplicas }}"
     autoscaling.knative.dev/max-scale: "{{ .Values.autoscaling.maxReplicas }}"
     autoscaling.knative.dev/target: "{{ .Values.autoscaling.scaleTarget }}"
+    serving.kserve.io/enable-tag-routing: "true"   # gọi đích danh revision qua tag URL
+
 spec:
   predictor:
     serviceAccountName: {{ .Values.serviceAccount.name }}
+    {{- if .Values.canary.enabled }}
+    canaryTrafficPercent: {{ .Values.canary.trafficPercent }}
+    {{- end }}
     model:
       modelFormat:
         name: lightgbm

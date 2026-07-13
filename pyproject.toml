@@ -68,10 +68,13 @@ exclude_lines = [
 ]
 
 [tool.mutmut]
-# Mutate only the recently-changed code files (not the whole codebase per commit)
-source_paths = [
+# The whole src tree is copied into mutants/ (imports must resolve there), but
+# only the files changed in this commit are mutated — not the whole codebase.
+source_paths = ["src"]
+only_mutate = [
     "src/fraud_detection/core/utils.py",
     "src/fraud_detection/core/api.py",
 ]
-runner = "python -m pytest tests/ --ignore=tests/locust_load_test.py -x -q --tb=no --no-header"
+# api.py loads models/feature_schema.json at import time, relative to its own location.
+also_copy = ["models"]
 pytest_add_cli_args_test_selection = ["tests/"]

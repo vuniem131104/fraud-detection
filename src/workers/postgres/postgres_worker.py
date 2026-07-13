@@ -148,7 +148,6 @@ class PredictionWriter(BaseKafkaWorker):
                     fraud_score, prediction, threshold, latency_ms
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (transaction_id) DO NOTHING
                 """,
                 (
                     transaction_id,

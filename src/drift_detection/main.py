@@ -1,7 +1,7 @@
 """FastAPI application for ``amount_usd`` drift detection.
 
 Wires together the training baseline (parquet) and Postgres via the app lifespan
-and exposes HTTP endpoints for health/readiness probes and PSI drift detection.
+and exposes HTTP endpoints for health/readiness probes and Wasserstein drift detection.
 Mirrors the structure of the ``fraud_detection`` service.
 """
 
@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="Fraud Detection – Drift Detection API",
-    description="Detects data drift on the **amount_usd** column using the Population Stability Index (PSI).",
+    description="Detects data drift on the **amount_usd** column using the log-scale Wasserstein distance.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -92,7 +92,7 @@ async def detect(
     threshold: float = Query(default=DEFAULT_THRESHOLD, gt=0, le=1),
     service: DriftDetectionService = Depends(get_drift_detection_service),
 ) -> DriftResult:
-    """Query ``amount_usd`` from Postgres (last 30 days) and run the PSI drift test against the training baseline."""
+    """Query ``amount_usd`` from Postgres (last 30 days) and run the Wasserstein drift test against the training baseline."""
     try:
         result = await service.detect(threshold=threshold)
     except InsufficientDataError as exc:
