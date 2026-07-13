@@ -98,33 +98,13 @@ def build_normal_payload() -> dict:
         "card_id":             pair["card_id"],
         "merchant_category":   random.choice(["retail", "grocery", "travel", "restaurant"]),
         "merchant_risk_level": random.randint(0, 3),
-        "amount_usd":          round(random.uniform(10, 500), 2),
+        "amount_usd":          round(random.uniform(20, 100), 2),
         "timestamp":           _ts(),
         "channel":             random.choice(["web", "mobile", "pos"]),
         "billing_country_code": "VN",
         "ip_country_code":     "VN",
         "email_purchaser":     f"buyer@gmail.com",
         "email_recipient":     f"seller@gmail.com",
-    }
-
-
-def build_anomalous_payload() -> dict:
-    """High-risk transaction using a real user/card pair – mismatched country, large amount."""
-    pair = random.choice(REAL_USER_CARDS)
-    rand_tag = uuid4().hex[:8]
-    return {
-        "transaction_id":      uuid4().hex,
-        "user_id":             pair["user_id"],
-        "card_id":             pair["card_id"],
-        "merchant_category":   "crypto",
-        "merchant_risk_level": random.randint(8, 10),
-        "amount_usd":          round(random.uniform(50_000, 1_000_000), 2),
-        "timestamp":           _ts(),
-        "channel":             "api",
-        "billing_country_code": "VN",
-        "ip_country_code":     "RU",
-        "email_purchaser":     "buyer@gmail.com",
-        "email_recipient":     f"cashout.{rand_tag}@protonmail.com",
     }
 
 
@@ -183,7 +163,6 @@ def worker(
     auth,
     stats,
     stop,
-    anomalous_ratio=0.5,
 ):
     """Continuously POST /score until `stop` is set."""
     client = httpx.Client(
@@ -194,11 +173,7 @@ def worker(
     )
     try:
         while not stop.is_set():
-            payload = (
-                build_anomalous_payload()
-                if random.random() < anomalous_ratio
-                else build_normal_payload()
-            )
+            payload = build_normal_payload()
             t0 = time.monotonic()
             try:
                 resp = client.post(SCORE_ENDPOINT, json=payload)
@@ -308,13 +283,6 @@ def parse_args() -> argparse.Namespace:
         help=f"Test duration in seconds (default: {DEFAULT_DURATION})",
     )
     p.add_argument(
-        "--anomalous-ratio",
-        type=float,
-        default=0.5,
-        dest="anomalous_ratio",
-        help="Fraction of requests that use the anomalous (heavier) payload (default: 0.5)",
-    )
-    p.add_argument(
         "--report-interval",
         type=int,
         default=10,
@@ -348,7 +316,6 @@ def main() -> int:
                 auth,
                 stats,
                 stop,
-                args.anomalous_ratio,
             )
             for _ in range(args.workers)
         ]

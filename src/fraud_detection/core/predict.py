@@ -11,6 +11,7 @@ result to Kafka and returns the structured prediction.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -460,8 +461,6 @@ class FraudDetectionService:
             raise RuntimeError("Failed to calculate derived features") from exc
         log_time_perf("Calculate derived features", operation_started_at)
 
-        print(f"Full feature: {json.dumps(features, indent=4, default=str)}")
-        
         operation_started_at = perf_counter()
         try:
             encoded = build_model_inputs(features, self.schema)

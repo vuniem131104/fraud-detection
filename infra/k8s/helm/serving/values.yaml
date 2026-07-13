@@ -19,3 +19,7 @@ serviceAccount:
 
 predictor:
   storageUri: "gs://fraud-detection-modelss/mlflow-artifacts/1/e546307bc95a4da08054a7458f5a2a81/artifacts"
+
+canary:
+  enabled: false
+  trafficPercent: 20

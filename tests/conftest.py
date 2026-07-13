@@ -1,18 +1,22 @@
 """Shared pytest fixtures and test doubles for the fraud-detection unit tests.
 
 Provides:
-  * a small synthetic feature schema (so we never load the real 44 MB schema),
-  * sample transaction / Redis-state payloads,
-  * async-aware mocks for Postgres, Redis and the inference service, and
-  * a FastAPI ``TestClient`` wired to those mocks (the app lifespan is bypassed,
-    so no real Postgres / Redis / KServe / Kafka connections are opened).
+  * a compact feature schema mirroring the real ``models/feature_schema.json``
+    structure (so tests never depend on the trained artifact),
+  * a valid scoring payload for the current ``FraudDetectionInputs`` schema,
+  * async-aware mocks for Postgres, Redis, the Feast online store and KServe,
+  * a fully-constructed ``FraudDetectionService`` wired to those mocks, and
+  * a FastAPI ``TestClient`` with the app lifespan bypassed (no real Postgres /
+    Redis / KServe / Kafka connections are ever opened).
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -20,26 +24,9 @@ from fraud_detection.core import api
 from fraud_detection.core.models import FraudDetectionOutputs
 from fraud_detection.core.predict import FraudDetectionService
 
-
-# ---------------------------------------------------------------------------
-# Small async helpers
-# ---------------------------------------------------------------------------
-
-class AsyncContextManager:
-    """Minimal async context manager yielding a fixed value.
-
-    Stands in for ``redis.pipeline(...)`` / ``database.transaction()`` which the
-    route handlers use via ``async with``.
-    """
-
-    def __init__(self, value: Any) -> None:
-        self.value = value
-
-    async def __aenter__(self) -> Any:
-        return self.value
-
-    async def __aexit__(self, *exc_info: object) -> bool:
-        return False
+# Keep pytest away from the locust file: importing locust applies gevent
+# monkey-patching, which breaks the rest of the test run.
+collect_ignore = ["locust_load_test.py"]
 
 
 # ---------------------------------------------------------------------------
@@ -48,155 +35,226 @@ class AsyncContextManager:
 
 @pytest.fixture
 def schema() -> dict[str, Any]:
-    """A compact, self-contained feature schema exercising the full build pipeline."""
+    """A compact feature schema with the same shape as the real artifact.
+
+    Keeps the categorical/numeric split and ordering semantics of
+    ``models/feature_schema.json`` while staying small enough to reason about
+    in assertions.
+    """
     return {
         "version": "test-1",
-        "training_reference_ts": "2017-12-01",
-        "email_bin": {"gmail.com": "google", "protonmail.com": "proton"},
-        "email_nulls": ["anonymous.com", "mail.com"],
-        "uid_columns": ["uid1", "uid2", "uid3", "uid4"],
-        "uid_agg_targets": ["amount_usd", "C13", "D15", "D4"],
-        "freq_tables": {"card_id": {}, "device_brand": {"windows": 0.25}},
-        "categorical_encoders": {
-            "channel": {"W": 1, "C": 2, "R": 3, "missing": 0},
-            "card_brand": {"visa": 1, "mastercard": 2, "missing": 0},
-            "missing_col_example": {"missing": 7},
-        },
+        "target": "is_fraud",
         "feature_columns": [
-            "amount_usd", "amount_log", "amount_cents",
-            "hour_of_day", "day_of_week", "is_weekend",
-            "C1", "C2", "C13", "D4", "D15",
-            "channel", "card_brand",
-            "card_id", "card_id_freq", "device_brand_freq",
-            "card_tx_count_so_far", "card_amount_sum_so_far",
-            "card_amount_mean_so_far", "amount_zscore_card",
-            "uid1_amount_usd_mean", "uid1_amount_usd_std",
-            "screen_width", "screen_height", "screen_area",
-            "os_version", "browser_version",
-            "browser_raw",          # stays a string -> coerced to NaN in assemble_vector
-            "missing_col_example",  # absent column filled by the categorical encoder
-            "V999",                 # never produced -> added as NaN
+            "amount_usd",
+            "log_amount",
+            "hour",
+            "weekday",
+            "is_night",
+            "channel",
+            "card_brand",
+            "merchant_category",
+            "merchant_risk_level",
+            "account_age_days",
+            "card_age_days",
+            "geo_mismatch",
+            "foreign_ip",
+            "recipient_differs",
+            "card_tx_count_1h",
+            "card_tx_count_24h",
+            "card_amount_sum_24h",
+            "card_seconds_since_last_tx",
+            "card_amount_zscore",
+            "card_tx_seq",
+            "card_declines_24h",
+            "user_tx_count_24h",
+            "user_amount_sum_24h",
+            "user_seconds_since_last_tx",
         ],
-        "target": "isFraud",
+        "categorical_encoders": {
+            "channel": {"web": 0, "mobile": 1, "pos": 2},
+            "card_brand": {"visa": 0, "mastercard": 1, "amex": 2},
+            "merchant_category": {"electronics": 0, "travel": 1, "grocery": 2},
+        },
     }
 
 
 @pytest.fixture
 def transaction_payload() -> dict[str, Any]:
-    """A valid scoring request body (uses the C*/D*/M* aliases of the input model)."""
+    """A valid request body for ``POST /score`` (current input schema)."""
     return {
-        "tx_id": "tx-100",
-        "event_timestamp": "2017-12-15T13:30:00",
+        "transaction_id": "tx-100",
+        "user_id": "user-1",
+        "card_id": "card-1",
+        "merchant_category": "electronics",
+        "merchant_risk_level": 3,
         "amount_usd": 50.0,
-        "channel": "W",
-        "user_id": "user-1",
-        "card_id": "0" * 31 + "1",  # 32-char hex, parsed by to_model_card_id
-        "card_country": 840,
-        "issuer_code": 84001,
-        "card_brand": "visa",
-        "bin_code": "411111",
-        "card_type": "credit",
-        "billing_zone": 1,
-        "billing_country": 840,
+        "timestamp": "2026-07-01T13:30:00Z",
+        "channel": "web",
+        "billing_country_code": "VN",
+        "ip_country_code": "VN",
         "email_purchaser": "buyer@gmail.com",
-        "email_recipient": "seller@gmail.com",
-        "device_type": "desktop",
-        "device_info": "desktop:Windows 11:Chrome",
-        "os_raw": "Windows 11",
-        "browser_raw": "Chrome 120",
-        "screen_resolution": "1920x1080",
-        "C1": 5,
-        "C2": 2,
-        "C13": 10,
-        "M1": "T",
-        "M2": "T",
-        "M6": "F",
-        "D4": 3.0,
-        "D15": 7.0,
+        "email_recipient": "seller@example.com",
     }
 
 
 @pytest.fixture
-def previous_transactions(transaction_payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Two earlier transactions for the same user/card (drives history aggregates)."""
-    older = {**transaction_payload, "tx_id": "old-1",
-             "event_timestamp": "2017-12-10T10:00:00", "amount_usd": 40.0, "C13": 3}
-    newer = {**transaction_payload, "tx_id": "old-2",
-             "event_timestamp": "2017-12-12T11:00:00", "amount_usd": 60.0, "C13": 4}
-    return [older, newer]
-
-
-@pytest.fixture
-def redis_state(previous_transactions: list[dict[str, Any]]) -> dict[str, Any]:
-    """A cached Redis state mirroring what ``RedisFeatureStore.get_txs`` returns."""
+def online_features() -> dict[str, Any]:
+    """Online-store values for a (user, card) pair, as Feast returns them."""
     return {
         "user_id": "user-1",
-        "card_id": "0" * 31 + "1",
-        "features": {
-            "no_transactions_30_days": 2,
-            "card_age_days": 3.0,
-            "no_days_since_last_txn": 5.0,
-        },
-        "transactions": previous_transactions,
+        "card_id": "card-1",
+        "card_brand": "visa",
+        "card_type": "credit",
+        "is_virtual": False,
+        "customer_segment": "retail",
+        "kyc_level": 2,
+        "email_verified": True,
+        "account_created_at": "2025-06-01T00:00:00Z",
+        "card_created_at": "2026-01-01T00:00:00Z",
+        "user_country": "VN",
     }
 
 
 # ---------------------------------------------------------------------------
-# Mock backends
+# Environment + mock backends
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def mock_service() -> MagicMock:
+def service_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set every environment variable ``FraudDetectionService.__init__`` reads."""
+    monkeypatch.setenv("KSERVE_URL", "http://kserve.local/v2/models/fraud/infer")
+    monkeypatch.setenv("DECISION_THRESHOLD", "0.8")
+    monkeypatch.setenv("CARD_TRANSACTIONS_KEY", "card:transactions")
+    monkeypatch.setenv("CARD_AGGREGATE_KEY", "card:aggregate")
+    monkeypatch.setenv("CARD_DECLINES_KEY", "card:declines")
+    monkeypatch.setenv("USER_TRANSACTIONS_KEY", "user:transactions")
+    monkeypatch.setenv("USER_AGGREGATE_KEY", "user:aggregate")
+    monkeypatch.setenv("PREDICTIONS_TOPIC", "predictions")
+    monkeypatch.setenv("MODEL_NAME", "fraud-model")
+    monkeypatch.setenv("MODEL_VERSION", "1")
+    monkeypatch.delenv("BOOTSTRAP_SERVERS", raising=False)
+
+
+@pytest.fixture
+def mock_database() -> MagicMock:
+    """A fake async Postgres database."""
+    database = MagicMock()
+    database.open = AsyncMock()
+    database.close = AsyncMock()
+    database.execute = AsyncMock(return_value="SELECT 1")
+    return database
+
+
+@pytest.fixture
+def card_velocity_result() -> list[Any]:
+    """Raw return of the card velocity Lua script.
+
+    ``[cnt_1h, cnt_24h, sum_24h, declines_24h, n, s, ss, last_txn_at]`` for a
+    card with 3 prior transactions of 40/50/60 USD, last seen at epoch
+    1782900000 (before the scored transaction).
+    """
+    return [1, 3, "150.0", 0, 3, "150.0", "7700.0", "1782900000.0"]
+
+
+@pytest.fixture
+def user_velocity_result() -> list[Any]:
+    """Raw return of the user velocity Lua script: ``[cnt_24h, sum_24h, last_txn_at]``."""
+    return [2, "90.0", "1782900000.0"]
+
+
+@pytest.fixture
+def mock_redis(card_velocity_result, user_velocity_result) -> MagicMock:
+    """A fake async Redis client whose registered Lua scripts are async mocks.
+
+    ``register_script`` is called twice by the service constructor — first for
+    the card script, then for the user script — so ``side_effect`` hands back
+    the matching async callables in that order.
+    """
+    redis = MagicMock()
+    redis.ping = AsyncMock(return_value=True)
+    redis.aclose = AsyncMock()
+    redis.card_script = AsyncMock(return_value=list(card_velocity_result))
+    redis.user_script = AsyncMock(return_value=list(user_velocity_result))
+    redis.register_script = MagicMock(side_effect=[redis.card_script, redis.user_script])
+    return redis
+
+
+@pytest.fixture
+def mock_feature_store(online_features) -> MagicMock:
+    """A fake Feast store returning the canned online feature values."""
+    store = MagicMock()
+    store.open = AsyncMock()
+    store.close = AsyncMock()
+    store.get_online_features = AsyncMock(return_value=dict(online_features))
+    return store
+
+
+def make_kserve_transport(probability: float = 0.35) -> tuple[httpx.MockTransport, list[dict]]:
+    """Build an httpx transport faking a KServe v2 endpoint.
+
+    Returns the transport plus a list capturing every request payload, so tests
+    can assert on the inference request the service actually built.
+    """
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"outputs": [{"name": "output-0", "data": [probability]}]},
+        )
+
+    return httpx.MockTransport(handler), seen
+
+
+@pytest.fixture
+def service(service_env, schema, mock_feature_store, mock_database, mock_redis) -> FraudDetectionService:
+    """A fully-constructed service with every backend mocked.
+
+    The KServe HTTP client is swapped for one backed by ``httpx.MockTransport``
+    returning probability 0.35; the captured request payloads are exposed as
+    ``service.kserve_requests`` for assertions.
+    """
+    svc = FraudDetectionService(
+        schema=schema,
+        feature_store=mock_feature_store,
+        database=mock_database,
+        redis_client=mock_redis,
+    )
+    transport, seen = make_kserve_transport(probability=0.35)
+    svc.kserve_client = httpx.AsyncClient(transport=transport)
+    svc.kserve_requests = seen
+    return svc
+
+
+# ---------------------------------------------------------------------------
+# Web API client
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def mock_service(transaction_payload) -> MagicMock:
     """A stand-in ``FraudDetectionService`` whose ``predict`` is an async mock."""
     service = MagicMock(spec=FraudDetectionService)
     service.predict = AsyncMock(
-        return_value=FraudDetectionOutputs(tx_id="tx-100", probability=0.83, prediction=1)
+        return_value=FraudDetectionOutputs(
+            transaction_id=transaction_payload["transaction_id"],
+            probability=0.83,
+            prediction=1,
+        )
     )
     return service
 
 
 @pytest.fixture
-def mock_database() -> tuple[MagicMock, AsyncMock]:
-    """A fake Postgres database plus the connection yielded by ``transaction()``."""
-    conn = AsyncMock()
-    conn.execute = AsyncMock(return_value="INSERT 0 1")
-
-    database = MagicMock()
-    database.execute = AsyncMock(return_value="SELECT 1")
-    database.transaction = MagicMock(return_value=AsyncContextManager(conn))
-    return database, conn
-
-
-@pytest.fixture
-def mock_redis() -> tuple[MagicMock, MagicMock]:
-    """A fake async Redis client plus the pipeline object it hands out."""
-    pipe = MagicMock()
-    pipe.delete = MagicMock()
-    pipe.hset = MagicMock()
-    pipe.execute = AsyncMock(return_value=[1, 1])
-
-    redis = MagicMock()
-    redis.ping = AsyncMock(return_value=True)
-    redis.pipeline = MagicMock(return_value=AsyncContextManager(pipe))
-    return redis, pipe
-
-
-@pytest.fixture
-def client(
-    mock_service: MagicMock,
-    mock_database: tuple[MagicMock, AsyncMock],
-    mock_redis: tuple[MagicMock, MagicMock],
-):
+def client(mock_service, mock_database, mock_redis):
     """A ``TestClient`` for the FastAPI app with all backends mocked.
 
-    The client is *not* used as a context manager, so the real ``lifespan`` never
-    runs; we populate ``app.state`` and override the service dependency by hand.
+    The client is *not* used as a context manager, so the real ``lifespan``
+    never runs; ``app.state`` is populated and the service dependency is
+    overridden by hand.
     """
-    database, _ = mock_database
-    redis, _ = mock_redis
-
-    api.app.state.database = database
-    api.app.state.redis_client = redis
+    api.app.state.database = mock_database
+    api.app.state.redis_client = mock_redis
     api.app.state.fraud_detection_service = mock_service
     api.app.dependency_overrides[api.get_fraud_detection_service] = lambda: mock_service
 
@@ -204,13 +262,3 @@ def client(
     yield test_client
 
     api.app.dependency_overrides.clear()
-
-
-@pytest.fixture
-def kserve_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Set the environment variables ``FraudDetectionService.__init__`` reads."""
-    monkeypatch.setenv("KSERVE_URL", "http://kserve.local/v2/models/fraud/infer")
-    monkeypatch.setenv("PREDICTIONS_TOPIC", "predictions")
-    monkeypatch.setenv("MODEL_NAME", "fraud-model")
-    monkeypatch.setenv("MODEL_VERSION", "1")
-    monkeypatch.setenv("FEATURE_BUILD_WORKERS", "1")

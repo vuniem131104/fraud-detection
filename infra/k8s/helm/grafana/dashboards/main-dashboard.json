@@ -253,7 +253,7 @@
     "to": "now"
   },
   "timepicker": {},
-  "title": "Accumulated Requests",
-  "uid": "accumulated-requests",
+  "title": "Requests Monitoring",
+  "uid": "requests-monitoring",
   "version": 2
 }

@@ -1,4 +1,12 @@
-"""Drift detector for the ``amount_usd`` column using the Population Stability Index (PSI)."""
+"""Drift detector for the ``amount_usd`` column using the log-scale Wasserstein distance.
+
+PSI on quantile bins is blind to right-tail *magnitude* shifts: because the top bin is
+open-ended, a distribution whose tail values explode (e.g. mean 59 → 19,375) can still
+score PSI ≈ 0 as long as the per-bin row proportions are roughly unchanged. The
+1-Wasserstein ("earth-mover") distance on ``log1p(amount)`` measures how far probability
+mass actually moves, so it reacts to scale/tail shifts while staying scale-free and
+comparable across columns.
+"""
 
 from __future__ import annotations
 
@@ -8,65 +16,54 @@ import pandas as pd
 COLUMN = "amount_usd"
 DEFAULT_THRESHOLD = 0.1
 
-# PSI thresholds (industry standard)
-# < 0.1  → no significant change
+# Wasserstein(log1p) thresholds — earth-mover distance in log-dollars.
+# < 0.1   → no significant change
 # 0.1–0.25 → moderate change, monitor
-# ≥ 0.25 → significant drift, investigate
-PSI_THRESHOLD_LOW = 0.1
-PSI_THRESHOLD_HIGH = 0.25
-_N_BINS = 10  # number of quantile-based bins for PSI
+# ≥ 0.25  → significant drift, investigate
+WD_THRESHOLD_LOW = 0.1
+WD_THRESHOLD_HIGH = 0.25
 
 
-def _compute_psi(baseline: np.ndarray, current: np.ndarray, n_bins: int = _N_BINS) -> float:
-    """Compute Population Stability Index (PSI) between baseline and current distributions.
+def _compute_wasserstein(baseline: np.ndarray, current: np.ndarray) -> float:
+    """Compute the 1-Wasserstein distance between ``log1p`` baseline and current amounts.
 
-    Bins are derived from the baseline quantiles so they are meaningful regardless
-    of the current distribution's range.
-
-    PSI = Σ (current% − baseline%) × ln(current% / baseline%)
-
-    A small epsilon is added before log to avoid division-by-zero when a bin is empty.
+    For two 1-D empirical samples the 1-Wasserstein distance equals the integral of the
+    absolute difference between their CDFs. Working in ``log1p`` space keeps the metric
+    scale-free and interpretable (distance in log-dollars) and prevents a few huge outliers
+    from dominating the raw-scale value. Implemented with numpy only (no scipy dependency).
 
     Args:
-        baseline: Reference distribution (1-D float array).
-        current:  Current distribution to compare against baseline.
-        n_bins:   Number of quantile-based bins (default 10).
+        baseline: Reference distribution (1-D float array, raw amounts).
+        current:  Current distribution to compare against baseline (raw amounts).
 
     Returns:
-        PSI value (float ≥ 0). Higher means more drift.
+        Wasserstein distance (float ≥ 0). Higher means more drift.
     """
-    # Build bin edges from baseline quantiles (equal-frequency binning)
-    quantiles = np.linspace(0, 100, n_bins + 1)
-    bin_edges = np.percentile(baseline, quantiles)
+    a = np.sort(np.log1p(baseline))
+    b = np.sort(np.log1p(current))
 
-    # Make edges unique and extend boundaries so all current values are captured
-    bin_edges = np.unique(bin_edges)
-    bin_edges[0] = -np.inf
-    bin_edges[-1] = np.inf
+    # Merge the support of both samples; integrate |CDF_a - CDF_b| over the gaps.
+    all_values = np.concatenate([a, b])
+    all_values.sort()
+    deltas = np.diff(all_values)
 
-    # Count observations per bin
-    baseline_counts = np.histogram(baseline, bins=bin_edges)[0]
-    current_counts = np.histogram(current, bins=bin_edges)[0]
+    cdf_a = np.searchsorted(a, all_values[:-1], side="right") / len(a)
+    cdf_b = np.searchsorted(b, all_values[:-1], side="right") / len(b)
 
-    # Convert to proportions, guard against zero-length arrays
-    eps = 1e-8
-    baseline_pct = baseline_counts / len(baseline) + eps
-    current_pct = current_counts / len(current) + eps
-
-    psi = float(np.sum((current_pct - baseline_pct) * np.log(current_pct / baseline_pct)))
-    return round(psi, 6)
+    wd = float(np.sum(np.abs(cdf_a - cdf_b) * deltas))
+    return round(wd, 6)
 
 
-def _psi_label(psi: float) -> str:
-    if psi < PSI_THRESHOLD_LOW:
+def _wd_label(wd: float) -> str:
+    if wd < WD_THRESHOLD_LOW:
         return "no_drift"
-    if psi < PSI_THRESHOLD_HIGH:
+    if wd < WD_THRESHOLD_HIGH:
         return "moderate_drift"
     return "significant_drift"
 
 
 class DriftDetector:
-    """Loads the baseline once and runs PSI drift detection on the ``amount_usd`` column on demand."""
+    """Loads the baseline once and runs Wasserstein drift detection on the ``amount_usd`` column on demand."""
 
     def __init__(self, baseline_df: pd.DataFrame, threshold: float = DEFAULT_THRESHOLD) -> None:
         self._baseline = baseline_df[COLUMN].dropna().to_numpy(dtype=float)
@@ -87,11 +84,11 @@ class DriftDetector:
         return len(self._baseline)
 
     def detect(self, amounts: list[float], threshold: float | None = None) -> dict:
-        """Run PSI between the training baseline and the current ``amount_usd`` window.
+        """Run the log-scale Wasserstein test between the baseline and the current ``amount_usd`` window.
 
         Args:
             amounts:   Current-window ``amount_usd`` values to compare against the baseline.
-            threshold: PSI cut-off above which drift is flagged. Falls back to the
+            threshold: Wasserstein cut-off above which drift is flagged. Falls back to the
                        detector's configured threshold when ``None``.
 
         Returns:
@@ -100,14 +97,14 @@ class DriftDetector:
         current = np.array(amounts, dtype=float)
         cutoff = self._threshold if threshold is None else threshold
 
-        psi = _compute_psi(self._baseline, current)
-        drift_detected = psi >= cutoff
+        wasserstein = _compute_wasserstein(self._baseline, current)
+        drift_detected = wasserstein >= cutoff
 
         return {
             "column": COLUMN,
             "drift_detected": bool(drift_detected),
-            "psi": psi,
-            "psi_label": _psi_label(psi),
+            "wasserstein": wasserstein,
+            "wasserstein_label": _wd_label(wasserstein),
             "threshold": cutoff,
             "n_current": len(amounts),
             "current_mean": round(float(np.mean(current)), 4),

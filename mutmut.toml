@@ -1,8 +1,0 @@
-[mutmut]
-# Only mutate recently-changed code files (the ones changed in this commit)
-source_paths = [
-    "src/fraud_detection/core/utils.py",
-    "src/fraud_detection/core/api.py",
-]
-debug = true
-pytest_add_cli_args_test_selection = ["tests/"]
