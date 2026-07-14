@@ -18,8 +18,8 @@ serviceAccount:
   gcpServiceAccount: "kserve-sa@project-57f7ef9a-6059-4068-ae7.iam.gserviceaccount.com"
 
 predictor:
-  storageUri: "gs://fraud-detection-modelss/mlflow-artifacts/1/e546307bc95a4da08054a7458f5a2a81/artifacts"
+  storageUri: "gs://fraud-detection-modelss/mlflow-artifacts/1/96f2cafad8074eb7937da1012ab7a8ed/artifacts"
 
 canary:
-  enabled: false
+  enabled: true
   trafficPercent: 20

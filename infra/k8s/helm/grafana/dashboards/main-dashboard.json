@@ -97,7 +97,10 @@
           "showLegend": true,
           "displayMode": "list",
           "placement": "bottom",
-          "calcs": ["sum", "max"]
+          "calcs": [
+            "sum",
+            "max"
+          ]
         }
       },
       "pluginVersion": "12.3.1",
@@ -151,7 +154,9 @@
         "footer": {
           "countRows": false,
           "fields": "",
-          "reducer": ["sum"],
+          "reducer": [
+            "sum"
+          ],
           "show": false
         },
         "showHeader": true
@@ -217,7 +222,9 @@
         "orientation": "auto",
         "percentChangeColorMode": "standard",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -244,7 +251,10 @@
   ],
   "preload": false,
   "schemaVersion": 42,
-  "tags": [],
+  "tags": [
+    "fraud-detection",
+    "requests"
+  ],
   "templating": {
     "list": []
   },

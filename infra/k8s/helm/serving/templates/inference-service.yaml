@@ -17,6 +17,7 @@ spec:
     model:
       modelFormat:
         name: lightgbm
+      runtime: kserve-mlserver
       protocolVersion: v2
       storageUri: {{ .Values.predictor.storageUri }}
       resources:

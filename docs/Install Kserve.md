@@ -27,41 +27,31 @@ kubectl apply -f - <<EOF
 apiVersion: serving.kserve.io/v1alpha1
 kind: ClusterServingRuntime
 metadata:
-  name: kserve-lgbserver
-  annotations:
-    serving.kserve.io/server-type: lgbserver
+  name: kserve-mlserver
 spec:
-  annotations:
-    prometheus.kserve.io/port: '8080'
-    prometheus.kserve.io/path: "/metrics"
+  protocolVersions:
+    - v2
   supportedModelFormats:
     - name: lightgbm
       version: "4"
       autoSelect: true
-      priority: 1
-  protocolVersions:
-    - v1
-    - v2
+      priority: 2
+    - name: sklearn
+      version: "1"
+      autoSelect: true
+      priority: 2
   containers:
     - name: kserve-container
-      image: kserve/lgbserver:v0.18.0
-      args:
-        - --model_name={{.Name}}
-        - --model_dir=/mnt/models
-        - --http_port=8080
-        - --nthread=1
-      securityContext:
-        allowPrivilegeEscalation: false
-        privileged: false
-        runAsNonRoot: true
-        capabilities:
-          drop:
-            - ALL
+      image: docker.io/seldonio/mlserver:1.6.1
+      env:
+        - name: MLSERVER_HTTP_PORT
+          value: "8080"
+        - name: MLSERVER_GRPC_PORT
+          value: "9000"
+        - name: MODELS_DIR
+          value: /mnt/models
       resources:
         requests:
-          cpu: "1"
-          memory: 2Gi
-        limits:
           cpu: "1"
           memory: 2Gi
 EOF
