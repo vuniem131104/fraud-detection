@@ -500,12 +500,13 @@ initChownData:
 
 # Administrator credentials when not using an existing secret (see below)
 adminUser: admin
-adminPassword: Vuniem131104!
+adminPassword: ""
 
 # Use an existing secret for the admin user.
+# Synced from GCP Secret Manager by infra/k8s/manifests/grafana-admin-external-secret.yaml
 admin:
   ## Name of the secret. Can be templated.
-  existingSecret: ""
+  existingSecret: grafana-admin-credentials
   userKey: admin-user
   passwordKey: admin-password
 
@@ -662,7 +663,9 @@ lifecycleHooks: {}
 
 ## Pass the plugins you want installed as a list.
 ##
-plugins: []
+plugins:
+  # JSON API datasource — dashboard drift gọi thẳng drift-detection service
+  - yesoreyeram-infinity-datasource
   # - digrich-bubblechart-panel
   # - grafana-clock-panel
   ## You can also use other plugin download URL, as long as they are valid zip files,
@@ -697,6 +700,12 @@ datasources:
           maxIdleConns: 10
           postgresVersion: 15
           connMaxLifetime: 14400
+        access: proxy
+        isDefault: false
+        editable: true
+      - name: DriftAPI
+        type: yesoreyeram-infinity-datasource
+        uid: DriftAPI
         access: proxy
         isDefault: false
         editable: true
@@ -891,11 +900,16 @@ dashboards:
   default:
     main-dashboard:
       file: dashboards/main-dashboard.json
+    # A/B model monitoring — so sánh 2 model version khi chạy canary split
+    ab-model-monitoring:
+      file: dashboards/ab-testing-dashboard.json
+    # Data drift — gọi API drift-detection service mỗi lần refresh (5m)
+    data-drift-monitoring:
+      file: dashboards/drift-dashboard.json
     # Prometheus 2.0 Overview — health/perf of the Prometheus server itself
+    # (vendor về repo từ gnetId 3662 rev 2 để gắn được tags)
     prometheus-stats:
-      gnetId: 3662
-      revision: 2
-      datasource: Prometheus
+      file: dashboards/prometheus-overview.json
     # Kubernetes Deployments / Pods via kube-state-metrics
     kubernetes-deployments:
       gnetId: 8588

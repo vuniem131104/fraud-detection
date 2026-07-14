@@ -249,7 +249,7 @@ class FraudDetectionService:
             await self.producer.stop()
         logger.info("FraudDetectionService has been closed")
 
-    async def predict_with_kserve(self, vector: list[float]) -> float:
+    async def predict_with_kserve(self, vector: list[float]) -> tuple[float, str]:
         """Send an encoded feature vector to KServe and return the fraud probability.
 
         Builds a KServe v2 inference payload from ``vector`` (non-finite values
@@ -260,7 +260,7 @@ class FraudDetectionService:
             vector: The ordered, encoded feature values in schema column order.
 
         Returns:
-            The fraud probability returned by the model.
+            A tuple of the fraud probability and the model version.
 
         Raises:
             RuntimeError: If the request fails, times out, returns an error
@@ -322,6 +322,7 @@ class FraudDetectionService:
                 raise ValueError("missing output data")
 
             probability = float(output_data[0])
+            model_version = result.get("model_version", "unknown")
         except (json.JSONDecodeError, TypeError, ValueError, IndexError, AttributeError) as exc:
             logger.exception(
                 "KServe inference response is invalid",
@@ -333,7 +334,7 @@ class FraudDetectionService:
             )
             raise RuntimeError("KServe inference response is invalid") from exc
 
-        return probability
+        return probability, model_version
 
     async def predict(self, inputs: FraudDetectionInputs) -> FraudDetectionOutputs:
         """Run the full fraud scoring pipeline for a single transaction.
@@ -472,7 +473,7 @@ class FraudDetectionService:
 
         operation_started_at = perf_counter()
         try:
-            probability = await self.predict_with_kserve(vector)
+            probability, model_version = await self.predict_with_kserve(vector)
         except Exception as exc:
             logger.exception("Failed to run inference", extra={"transaction_id": transaction_id})
             raise RuntimeError("Failed to run inference") from exc
@@ -505,7 +506,7 @@ class FraudDetectionService:
                         "prediction": prediction,
                         "latency_ms": latency,
                         "model_name": os.getenv("MODEL_NAME"),
-                        "model_version": os.getenv("MODEL_VERSION"),
+                        "model_version": model_version,
                         "threshold": self.threshold,
                     }).encode("utf-8"),
                     key=request_id.encode(),
@@ -527,10 +528,10 @@ class FraudDetectionService:
         logger.info(
             "Finished fraud prediction",
             extra={
-                "request_id": request_id,
                 "transaction_id": transaction_id,
                 "probability": probability,
                 "prediction": prediction,
+                "model_version": model_version,
                 "latency": latency,
                 "latency_unit": "milliseconds",
             },
