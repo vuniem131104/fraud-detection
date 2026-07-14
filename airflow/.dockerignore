@@ -1,0 +1,5 @@
+# The image only needs requirements.txt (see Dockerfile). The compose build
+# context is the repo root (`context: .`), so without this everything —
+# venv/, .git/, logs, DAGs — would be shipped to the Docker daemon each build.
+*
+!requirements.txt

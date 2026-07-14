@@ -1,0 +1,132 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: fraud-detection/airflow:3.2.2
+  env_file:
+    - .env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?set AIRFLOW_JWT_SECRET in .env}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "600"
+    AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: "600"
+    TZ: Asia/Ho_Chi_Minh
+    PYTHONPATH: /opt/airflow/code
+  volumes:
+    - ./src/dags:/opt/airflow/dags
+    - ./src/etl:/opt/airflow/code/etl
+    - ./src/logs:/opt/airflow/logs
+    - ./src/plugins:/opt/airflow/plugins
+    - ./feature_store:/opt/airflow/feature_store
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    cloud-sql-proxy:
+      condition: service_healthy
+
+services:
+
+  cloud-sql-proxy:
+    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1-alpine
+    env_file:
+      - .env
+    restart: unless-stopped
+    user: "${AIRFLOW_UID:-1000}:0"
+    command:
+      - "--address=0.0.0.0"
+      - "--port=5432"
+      - "--health-check"
+      - "--http-address=0.0.0.0"
+      - "--http-port=9090"
+      - "${CLOUDSQL_CONNECTION_NAME}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:9090/readiness >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.12.0
+    env_file:
+      - .env
+    ports:
+      - "5000:5000"
+    command: >
+      sh -c "pip install -q psycopg2-binary google-cloud-storage &&
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://$$MLFLOW_DB_USER:$$MLFLOW_DB_PASSWORD@cloud-sql-proxy:5432/$$MLFLOW_DB
+      --default-artifact-root gs://$$MODEL_STORAGE_BUCKET_NAME/mlflow-artifacts"
+    depends_on:
+      cloud-sql-proxy:
+        condition: service_healthy
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    command:
+      - bash
+      - -c
+      - |
+        airflow db migrate
+        airflow fab-db migrate
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USER:-airflow}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD:-airflow}" \
+          --firstname Admin --lastname User --role Admin \
+          --email admin@example.com || true
+    restart: on-failure
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8090:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Airflow 3 moved DAG file parsing out of the scheduler into a standalone
+  # process. Without this service no DAG files are parsed and the UI shows none.
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD", "airflow", "jobs", "check", "--job-type", "DagProcessorJob", "--local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
