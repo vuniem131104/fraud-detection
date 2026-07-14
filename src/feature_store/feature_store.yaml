@@ -1,0 +1,22 @@
+project: fraud_detection
+
+provider: local
+
+registry:
+  registry_type: sql
+  path: ${FEAST_REGISTRY_PATH}
+
+offline_store:
+  type: postgres
+  host: ${POSTGRES_HOST}
+  port: ${POSTGRES_PORT}
+  database: ${POSTGRES_DB}
+  db_schema: application
+  user: ${POSTGRES_USER}
+  password: ${POSTGRES_PASSWORD}
+  sslmode: disable
+
+online_store:
+  type: redis
+  connection_string: ${REDIS_HOST}:${REDIS_PORT}
+  # we dont set TTL here because each feature in redis changes infreqently 

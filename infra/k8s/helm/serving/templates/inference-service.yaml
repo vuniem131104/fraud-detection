@@ -1,0 +1,29 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: {{ .Values.modelName }}
+  annotations:
+    autoscaling.knative.dev/min-scale: "{{ .Values.autoscaling.minReplicas }}"
+    autoscaling.knative.dev/max-scale: "{{ .Values.autoscaling.maxReplicas }}"
+    autoscaling.knative.dev/target: "{{ .Values.autoscaling.scaleTarget }}"
+    serving.kserve.io/enable-tag-routing: "true"   # gọi đích danh revision qua tag URL
+
+spec:
+  predictor:
+    serviceAccountName: {{ .Values.serviceAccount.name }}
+    {{- if .Values.canary.enabled }}
+    canaryTrafficPercent: {{ .Values.canary.trafficPercent }}
+    {{- end }}
+    model:
+      modelFormat:
+        name: lightgbm
+      runtime: kserve-mlserver
+      protocolVersion: v2
+      storageUri: {{ .Values.predictor.storageUri }}
+      resources:
+        limits:
+          cpu: {{ .Values.resources.limits.cpu }}
+          memory: {{ .Values.resources.limits.memory }}
+        requests:
+          cpu: {{ .Values.resources.requests.cpu }}
+          memory: {{ .Values.resources.requests.memory }}

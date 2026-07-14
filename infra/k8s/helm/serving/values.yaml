@@ -1,0 +1,25 @@
+modelName: fraud-detection
+
+autoscaling:
+  minReplicas: 1
+  maxReplicas: 5
+  scaleTarget: 10
+
+resources:
+  limits:
+    cpu: "1000m"
+    memory: "512Mi"
+  requests:
+    cpu: "256m"
+    memory: "256Mi"
+
+serviceAccount:
+  name: kserve-sa
+  gcpServiceAccount: "kserve-sa@project-57f7ef9a-6059-4068-ae7.iam.gserviceaccount.com"
+
+predictor:
+  storageUri: "gs://fraud-detection-modelss/mlflow-artifacts/1/96f2cafad8074eb7937da1012ab7a8ed/artifacts"
+
+canary:
+  enabled: true
+  trafficPercent: 20

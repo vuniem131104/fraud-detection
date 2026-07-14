@@ -1,0 +1,8 @@
+{
+  "name": "fraud-detection",
+  "implementation": "mlserver_lightgbm.LightGBMModel",
+  "parameters": {
+    "uri": "./model.bst",
+    "version": "e546307b"
+  }
+}

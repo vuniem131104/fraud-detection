@@ -1,0 +1,80 @@
+[project]
+name = "fraud-detection"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "boto3==1.43.10",
+    "fastapi==0.125.0",
+    "lightgbm==4.6.0",
+    "mlflow==3.12.0",
+    "numpy==2.4.5",
+    "pandas==2.3.3",
+    "requests==2.34.2",
+    "scikit-learn==1.8.0",
+    "uvicorn==0.34.0",
+    "google-cloud-storage==3.10.1",
+    "redis==7.4.0",
+    "structlog==25.5.0",
+    "httpx==0.28.1",
+    "asyncpg>=0.31.0",
+    "aiokafka>=0.14.0",
+    "confluent-kafka>=2.14.2",
+    "feast>=0.63.0",
+    "psycopg[binary,pool]==3.3.4",
+    "sqlalchemy>=2.0",
+    "dvc[gs]>=3.67.1",
+    "email-validator>=2.3.0",
+]
+# NOTE: Airflow runs in its own Docker container (apache/airflow image), NOT in
+# this venv. It is intentionally kept out of this project entirely because
+# apache-airflow-core pins sqlalchemy<2.0, which would block the psycopg v3
+# SQLAlchemy dialect (postgresql+psycopg) used by the Feast SQL registry.
+# For local DAG authoring, build a SEPARATE venv from airflow/requirements-dev.txt.
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.155.7",
+    "locust==2.44.0",
+    "mutmut>=3.6.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra"
+filterwarnings = [
+    "ignore:.*HTTP_422_UNPROCESSABLE_ENTITY.*:DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src/fraud_detection"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+precision = 2
+fail_under = 90
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]
+
+[tool.mutmut]
+# The whole src tree is copied into mutants/ (imports must resolve there), but
+# only the files changed in this commit are mutated — not the whole codebase.
+source_paths = ["src"]
+only_mutate = [
+    "src/fraud_detection/core/utils.py",
+    "src/fraud_detection/core/api.py",
+]
+# api.py loads models/feature_schema.json at import time, relative to its own location.
+also_copy = ["models"]
+pytest_add_cli_args_test_selection = ["tests/"]

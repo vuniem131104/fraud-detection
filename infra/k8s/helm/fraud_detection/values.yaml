@@ -1,0 +1,66 @@
+namespace: core
+
+api:
+  name: fraud-detection
+  replicaCount: 2
+  strategy:
+    type: RollingUpdate
+    params:
+      maxUnavailable: 1
+      maxSurge: 1
+  image:
+    repository: us-central1-docker.pkg.dev/project-57f7ef9a-6059-4068-ae7/fraud-detection/fraud-detection
+    tag: "latest"
+    pullPolicy: Always
+  port: 1311
+  resources:
+    requests:
+      cpu: "1000m"
+      memory: "1Gi"
+    limits:
+      cpu: "2000m"
+      memory: "2Gi"
+
+cloudSqlProxy:
+  image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.22.1
+  port: 5432
+  resources:
+    requests:
+      cpu: "128m"
+      memory: "128Mi"
+    limits:
+      cpu: "256m"
+      memory: "256Mi"
+
+serviceAccount:
+  name: fraud-detection-sa
+  gcpServiceAccount: "fraud-detection-sa@project-57f7ef9a-6059-4068-ae7.iam.gserviceaccount.com"
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: http
+
+ingress:
+  enabled: true
+  host: "fraud-detection-api.34.56.166.63.sslip.io"
+  ingressClassName: nginx
+  rewriteTarget: "/"
+  maxBodySize: "50m"
+  tls:
+    enabled: false
+    secretName: "fraud-detection-tls"
+  auth:
+    enabled: true
+    secretName: "basic-auth"
+    realm: "Fraud Detection API"
+  rateLimit:
+    rps: "10"
+    connections: "20"
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilization: 70
+  targetMemoryUtilization: 85

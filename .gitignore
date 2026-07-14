@@ -1,0 +1,34 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+# DVC-tracked datasets: ignore the data files, but keep the .dvc pointers and
+# DVC's own .gitignore under version control.
+dataset/*
+!dataset/*.dvc
+!dataset/.gitignore
+.env
+data/
+
+certs/
+*.pem
+service.cert
+service.key
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+logs/
+*.mp4
+# mutation testing / property-based testing artifacts
+mutants/
+.hypothesis/

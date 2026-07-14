@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "offline_source": "feast::fraud_detection_service",
+  "feature_view": "transaction_features",
+  "label_table": "application.labels",
+  "target": "label",
+  "feature_columns": [
+    "amount_usd",
+    "log_amount",
+    "hour",
+    "weekday",
+    "is_night",
+    "channel",
+    "card_brand",
+    "card_type",
+    "is_virtual",
+    "customer_segment",
+    "kyc_level",
+    "email_verified",
+    "merchant_category",
+    "merchant_risk_level",
+    "account_age_days",
+    "card_age_days",
+    "geo_mismatch",
+    "foreign_ip",
+    "recipient_differs",
+    "card_tx_count_1h",
+    "card_tx_count_24h",
+    "card_amount_sum_24h",
+    "card_seconds_since_last_tx",
+    "card_amount_zscore",
+    "card_tx_seq",
+    "card_declines_24h",
+    "user_tx_count_24h",
+    "user_amount_sum_24h",
+    "user_seconds_since_last_tx"
+  ],
+  "categorical_features": [
+    "channel",
+    "card_brand",
+    "card_type",
+    "customer_segment",
+    "merchant_category",
+    "is_virtual",
+    "email_verified"
+  ],
+  "categorical_encoders": {
+    "channel": {
+      "mobile_app": 0,
+      "pos": 1,
+      "web": 2
+    },
+    "card_brand": {
+      "Amex": 0,
+      "Mastercard": 1,
+      "Visa": 2
+    },
+    "card_type": {
+      "credit": 0,
+      "debit": 1
+    },
+    "customer_segment": {
+      "normal": 0,
+      "premium": 1,
+      "vip": 2
+    },
+    "merchant_category": {
+      "crypto": 0,
+      "digital_goods": 1,
+      "electronics": 2,
+      "fashion": 3,
+      "gambling": 4,
+      "gaming": 5,
+      "grocery": 6,
+      "money_transfer": 7,
+      "pharmacy": 8,
+      "restaurant": 9,
+      "subscription": 10,
+      "travel": 11,
+      "utilities": 12
+    },
+    "is_virtual": {
+      "False": 0,
+      "True": 1
+    },
+    "email_verified": {
+      "False": 0,
+      "True": 1
+    }
+  },
+  "lgb_params": {
+    "objective": "binary",
+    "metric": [
+      "average_precision",
+      "auc"
+    ],
+    "boosting_type": "gbdt",
+    "learning_rate": 0.02,
+    "num_leaves": 128,
+    "min_child_samples": 100,
+    "feature_fraction": 0.7,
+    "bagging_fraction": 0.85,
+    "bagging_freq": 1,
+    "lambda_l1": 0.1,
+    "lambda_l2": 0.1,
+    "verbose": -1,
+    "n_jobs": -1,
+    "seed": 42
+  }
+}

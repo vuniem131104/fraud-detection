@@ -1,0 +1,12 @@
+.git
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+data/
+dataset/
+# Re-include the drift baseline so Dockerfile.driftDetection can bake it in.
+!dataset/training_data.parquet
+.env

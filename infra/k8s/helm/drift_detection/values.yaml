@@ -1,0 +1,42 @@
+namespace: core
+
+api:
+  name: drift-detection-api
+  replicaCount: 1
+  strategy:
+    type: RollingUpdate
+    params:
+      maxUnavailable: 0
+      maxSurge: 1
+  image:
+    repository: us-central1-docker.pkg.dev/project-57f7ef9a-6059-4068-ae7/fraud-detection/drift-detection-api
+    tag: "latest"
+    pullPolicy: Always
+  port: 8001
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1500Mi"
+
+cloudSqlProxy:
+  image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.22.1
+  port: 5432
+  resources:
+    requests:
+      cpu: "128m"
+      memory: "128Mi"
+    limits:
+      cpu: "256m"
+      memory: "256Mi"
+
+serviceAccount:
+  name: drift-detection-api-sa
+  gcpServiceAccount: "drift-detection-api-sa@project-57f7ef9a-6059-4068-ae7.iam.gserviceaccount.com"
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: http
