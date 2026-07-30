@@ -1,0 +1,38 @@
+---
+- name: Install Google Cloud CLI
+  when: gcp_install_cloud_cli
+  block:
+    - name: Ensure apt keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Google Cloud apt GPG key
+      ansible.builtin.get_url:
+        url: "{{ gcp_apt_gpg_url }}"
+        dest: /etc/apt/keyrings/cloud.google.asc
+        mode: "0644"
+
+    - name: Add Google Cloud apt repository
+      ansible.builtin.apt_repository:
+        repo: "{{ gcp_apt_repo }}"
+        filename: google-cloud-sdk
+        state: present
+
+    - name: Install google-cloud-cli
+      ansible.builtin.apt:
+        name: google-cloud-cli
+        state: present
+        update_cache: true
+
+# The VM authenticates as its attached service account via the metadata server —
+# no key file. `configure-docker` wires docker's credHelper to gcloud, which
+# uses those ADC credentials when pulling/pushing to Artifact Registry.
+- name: Configure docker auth for Artifact Registry (as the deploy user)
+  when: configure_artifact_registry_auth
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command: "gcloud auth configure-docker {{ artifact_registry_host }} --quiet"
+  register: ar_auth
+  changed_when: "'Docker configuration file updated' in ar_auth.stderr or 'Adding credentials' in ar_auth.stderr"

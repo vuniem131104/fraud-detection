@@ -8,20 +8,23 @@ predictionWriter:
     tag: "latest"
     pullPolicy: Always
   resources:
+    # KEDA scales this 0<->2 on Kafka lag; trim per-pod CPU/mem so a burst fits
+    # anywhere (incl. the 2-vCPU node).
     requests:
-      cpu: "250m"
-      memory: "1Gi"
+      cpu: "100m"
+      memory: "512Mi"
     limits:
-      cpu: "1500m"
-      memory: "2Gi"
+      cpu: "1000m"
+      memory: "1Gi"
 
 cloudSqlProxy:
   image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.22.1
   port: 5432
   resources:
+    # cloud-sql-proxy sidecar — align with the other services' proxy (128m/128Mi).
     requests:
-      cpu: "250m"
-      memory: "256Mi"
+      cpu: "128m"
+      memory: "128Mi"
     limits:
       cpu: "500m"
       memory: "1Gi"

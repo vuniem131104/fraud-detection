@@ -55,8 +55,9 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
-import asyncpg
 import numpy as np
+# asyncpg chỉ cần khi nạp thẳng vào Postgres (hàm ``run``) -> import lazy để
+# các generator khác tái dùng được module này mà không cần cài driver.
 
 HCM_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
 
@@ -228,6 +229,19 @@ RING_DEVICES = 30           # small shared device pool -> strong graph signal
 RING_EMAILS = 50            # shared cash-out recipient emails
 FAMILY_DEVICES = 200        # legit devices shared by 2-3 users (mild, as noise)
 RING_ROUTE_PROB = 0.6       # share of episodes routed through ring infra
+
+# Card testing runs through a handful of weak merchant endpoints (no 3DS, no rate
+# limit), not spread across the whole catalogue. This concentration is what makes
+# merchant-level real-time features (merch_tx_count_10min,
+# merch_distinct_cards_10min) discriminative: at ~800 tx/day over 1500 merchants
+# a random merchant never sees 2 transactions in the same 10 minutes, so without
+# concentration those features would be a constant and the model would ignore them.
+COMPROMISED_MERCHANTS = 25
+
+# A ring's transactions must land close together in time, otherwise
+# device_distinct_users_1h can never observe more than one victim per window.
+# Real device farms do work in sessions, so this is realism, not a fudge.
+RING_SESSION_HOURS = 6
 
 
 # --------------------------------------------------------------------------- #
@@ -456,6 +470,10 @@ def generate_transactions(
     family_dev = [int(x) for x in nprng.choice(non_ring, size=min(FAMILY_DEVICES, len(non_ring)), replace=False)]
     ring_emails = [f"cashout{i:03d}@proton.me" for i in range(RING_EMAILS)]
 
+    # Weak merchant endpoints that card-testing bots abuse (see COMPROMISED_MERCHANTS).
+    compromised = [int(x) for x in nprng.choice(
+        n_merch, size=min(COMPROMISED_MERCHANTS, n_merch), replace=False)]
+
     # Each user's habitual device (a few share a family device).
     home_device = [rng.choice(family_dev) if rng.random() < 0.03 else rng.choice(non_ring)
                    for _ in range(n_users)]
@@ -524,11 +542,16 @@ def generate_transactions(
         dev = episode_device(uidx, own_ok=False)
         base = _time_between(rng, max(card.created_at, now - timedelta(days=days)), now - timedelta(hours=2))
         k = rng.randint(12, 45)
+        # ONE weak endpoint for the whole episode: the bot found a merchant with no
+        # 3DS and no rate limit and keeps hammering it. Concentrating here is what
+        # makes merch_*_10min separate an attacked merchant (25 cards / 10 min)
+        # from a normal one (1 card / 10 min).
+        merch = merchants[rng.choice(compromised)]
         t = base
         for j in range(k):
             t = t + timedelta(seconds=rng.uniform(4, 90))
             ramp = min(0.85, 0.08 + j * 0.03)      # declines climb as issuer reacts
-            emit(user=user, card=card, merch=merchants[rng.randrange(n_merch)], device_idx=dev,
+            emit(user=user, card=card, merch=merch, device_idx=dev,
                  amount=round(rng.uniform(0.2, 6.0), 2), created=t, is_fraud=True,
                  archetype="card_testing", ip=fraud_ip(user), recipient=user.email,
                  status="declined" if rng.random() < ramp else "approved")
@@ -592,12 +615,16 @@ def generate_transactions(
         email = rng.choice(ring_emails)
         emitted = 0
         base = _time_between(rng, now - timedelta(days=days), now - timedelta(days=2))
+        # One WORKING SESSION, not days of drift: the farm cycles its victims over a
+        # few hours. Needed for device_distinct_users_1h to ever see >1 victim in a
+        # window (a ring spread over 3 days looks like a normal shared device).
+        session_end = min(base + timedelta(hours=RING_SESSION_HOURS), now)
         for _ in range(rng.randint(5, 15)):
             uidx = int(nprng.choice(n_users, p=user_weights))
             user = users[uidx]
             card = cards[rng.choice(per_user_cards[uidx])]
             for _ in range(rng.randint(1, 2)):
-                t = _time_between(rng, base, min(base + timedelta(days=3), now))
+                t = _time_between(rng, base, session_end)
                 emit(user=user, card=card, merch=merchants[rng.randrange(n_merch)], device_idx=dev,
                      amount=_near_threshold(rng) if rng.random() < 0.3 else rng.uniform(50, 1500),
                      created=t, is_fraud=True,
@@ -795,6 +822,8 @@ async def quality_report(conn: asyncpg.Connection, stats: dict) -> None:
 
 async def run(args: argparse.Namespace) -> int:
     """Create the schema, generate every table in memory, load and report."""
+    import asyncpg  # lazy: chỉ cần khi thực sự nạp vào Postgres
+
     rng = random.Random(args.seed)
     nprng = np.random.default_rng(args.seed)
     now = datetime.now(HCM_TZ).replace(microsecond=0)
@@ -835,10 +864,10 @@ async def run(args: argparse.Namespace) -> int:
                             "country_code", "risk_level", "created_at"], merchant_rows)
             await copy_rows(conn, "cards", ["id", "user_id", "issuer_code",
                             "country_code", "brand", "type", "bin_code", "is_virtual", "created_at"], card_rows)
-            await copy_rows(conn, "transactions", ["id", "user_id", "card_id",
-                            "merchant_id", "device_id", "amount_usd", "currency", "channel",
-                            "billing_country_code", "ip_country_code", "email_purchaser",
-                            "email_recipient", "status", "created_at"], tx_rows)
+            # await copy_rows(conn, "transactions", ["id", "user_id", "card_id",
+            #                 "merchant_id", "device_id", "amount_usd", "currency", "channel",
+            #                 "billing_country_code", "ip_country_code", "email_purchaser",
+            #                 "email_recipient", "status", "created_at"], tx_rows)
             await copy_rows(conn, "labels", ["transaction_id", "label",
                             "label_source", "created_at"], label_rows)
         print("Creating indexes + ANALYZE ...")

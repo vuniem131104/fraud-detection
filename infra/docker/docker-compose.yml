@@ -1,140 +1,99 @@
 services:
-  # redpanda:
-  #   image: docker.redpanda.com/redpandadata/redpanda:v26.1.9
+  # lgbserver:
+  #   image: kserve/lgbserver:latest
+  #   container_name: lightgbm-lgbserver
+  #   env_file:
+  #     - ../../.env
+  #   ports:
+  #     - "8085:9080"
+  #   volumes:
+  #     - ../../models:/mnt/models:ro
   #   command:
-  #     - redpanda
-  #     - start
-  #     - --smp
-  #     - "1"
-  #     - --overprovisioned
-  #     - --node-id
-  #     - "0"
-  #     - --kafka-addr
-  #     - PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
-  #     - --advertise-kafka-addr
-  #     - PLAINTEXT://redpanda:29092,OUTSIDE://172.21.0.1:9092
-  #     - --pandaproxy-addr
-  #     - 0.0.0.0:8082
-  #     - --advertise-pandaproxy-addr
-  #     - localhost:8082
-  #   ports:
-  #     - 8081:8081
-  #     - 8082:8082
-  #     - 9092:9092
-  #     - 29092:29092
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "rpk cluster info -X brokers=127.0.0.1:29092 >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8081/subjects >/dev/null"]
-  #     interval: 10s
-  #     timeout: 6s
-  #     retries: 10
+  #     - --model_dir
+  #     - /mnt/models
+  #     - --model_name
+  #     - fraud-detection
+  #     - --http_port
+  #     - "9080"
+  #     - --workers
+  #     - "${KSERVE_WORKERS:-5}"
+  #     - --nthread
+  #     - "${KSERVE_THREADS_PER_WORKER:-1}"
 
-  # console:
-  #   image: docker.redpanda.com/redpandadata/console:v2.8.13
-  #   restart: on-failure
-  #   entrypoint: /bin/sh
-  #   command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml; /app/console"
+  # postgres:
+  #   image: postgres:16
+  #   env_file:
+  #     - ../../.env
   #   environment:
-  #     CONFIG_FILEPATH: /tmp/config.yml
-  #     CONSOLE_CONFIG_FILE: |
-  #       kafka:
-  #         brokers: ["redpanda:29092"]
-  #         schemaRegistry:
-  #           enabled: true
-  #           urls: ["http://redpanda:8081"]
-  #   ports:
-  #     - "8090:8080"
-  #   depends_on:
-  #     redpanda:
-  #       condition: service_healthy
-
-  # fraud-detection-api:
-  #   build:
-  #     context: ../..
-  #     dockerfile: infra/docker/Dockerfile.fraudDetection
-  #   env_file:
-  #     - ../../.env
-  #   ports:
-  #     - "1311:1311"
+  #     TZ: Asia/Ho_Chi_Minh
+  #     PGTZ: Asia/Ho_Chi_Minh
+  #   command: ["postgres", "-c", "timezone=Asia/Ho_Chi_Minh"]
+  #   ports: ["5432:5432"]
   #   volumes:
-  #     - ../../certs:/app/certs:ro
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #     lgbserver:
-  #       condition: service_started
-  #     # redpanda:
-  #       # condition: service_healthy
-  #   restart: unless-stopped
+  #     - pgdata:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
 
-  # prediction-writer:
-  #   build:
-  #     context: ../..
-  #     dockerfile: infra/docker/Dockerfile.predictionWriter
-  #   env_file:
-  #     - ../../.env
-  #   volumes:
-  #     - ../../certs:/app/certs:ro
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redpanda:
-  #       condition: service_healthy
-  #   restart: unless-stopped
-
-  # feature-refresher:
-  #   build:
-  #     context: ../..
-  #     dockerfile: infra/docker/Dockerfile.featureRefresher
-  #   env_file:
-  #     - ../../.env
-  #   volumes:
-  #     - ../../certs:/app/certs:ro
-  #   depends_on:
-  #     redis:
-  #       condition: service_healthy
-  #     redpanda:
-  #       condition: service_healthy
-  #   restart: unless-stopped
-
-  lgbserver:
-    image: kserve/lgbserver:latest
-    container_name: lightgbm-lgbserver
-    env_file:
-      - ../../.env
-    ports:
-      - "8085:9080"
-    volumes:
-      - ../../models:/mnt/models:ro
-    command:
-      - --model_dir
-      - /mnt/models
-      - --model_name
-      - fraud-detection
-      - --http_port
-      - "9080"
-      - --workers
-      - "${KSERVE_WORKERS:-5}"
-      - --nthread
-      - "${KSERVE_THREADS_PER_WORKER:-1}"
-
-  postgres:
+  # ===================================================================
+  # MLflow — tracking server + model registry
+  #   UI / API : http://localhost:5000   (khớp MLFLOW_TRACKING_URI trong .env)
+  #   Backend  : Postgres riêng ở cổng 5433 (5432 đã bị stack data_pipelines dùng)
+  #   Artifact : volume mlflow-artifacts, phục vụ qua --serve-artifacts nên
+  #              client không cần tự truy cập đường dẫn lưu trữ
+  # ===================================================================
+  mlflow-postgres:
     image: postgres:16
-    env_file:
-      - ../../.env
+    container_name: mlflow-postgres
     environment:
+      POSTGRES_USER: ${MLFLOW_DB_USER}
+      POSTGRES_PASSWORD: ${MLFLOW_DB_PASSWORD}
+      POSTGRES_DB: ${MLFLOW_DB}
       TZ: Asia/Ho_Chi_Minh
       PGTZ: Asia/Ho_Chi_Minh
     command: ["postgres", "-c", "timezone=Asia/Ho_Chi_Minh"]
-    ports: ["5432:5432"]
+    ports:
+      - "5433:5432"   # cổng khác 5432 để chạy song song với Postgres của data pipeline
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - mlflow-pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    image: fraud-detection/mlflow:3.12.0
+    container_name: mlflow
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+    command:
+      - mlflow
+      - server
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "5000"
+      # trong docker network dùng tên service; DB nằm ở cổng 5432 BÊN TRONG container
+      - --backend-store-uri
+      - postgresql+psycopg2://${MLFLOW_DB_USER}:${MLFLOW_DB_PASSWORD}@mlflow-postgres:5432/${MLFLOW_DB}
+      - --artifacts-destination
+      - /mlflow/artifacts
+      - --serve-artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-artifacts:/mlflow/artifacts
+    depends_on:
+      mlflow-postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
   redis:
     image: redis:7.2-alpine
@@ -155,3 +114,5 @@ services:
 volumes:
   pgdata:
   redis-data:
+  mlflow-pgdata:      # backend store của MLflow (experiment, run, registry)
+  mlflow-artifacts:   # model artifact do MLflow phục vụ

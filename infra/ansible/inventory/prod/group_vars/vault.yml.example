@@ -1,0 +1,21 @@
+# Secrets for the Airflow/MLflow stack. Create the real, ENCRYPTED file with:
+#   cp vault.yml.example vault.yml
+#   # edit values, then:
+#   ansible-vault encrypt vault.yml
+# Run playbooks with --ask-vault-pass (or --vault-password-file).
+#
+# These mirror the sensitive keys in airflow/.env.example. The DB user is the
+# same Cloud SQL user Terraform manages ("vuniem"); use its CURRENT password.
+
+vault_postgres_user: "vuniem"
+vault_postgres_password: "CHANGE_ME"
+
+vault_mlflow_db_user: "vuniem"
+vault_mlflow_db_password: "CHANGE_ME"
+
+# Airflow API JWT signing secret (openssl rand -hex 32)
+vault_airflow_jwt_secret: "CHANGE_ME"
+
+# Airflow web admin bootstrap account
+vault_airflow_admin_user: "airflow"
+vault_airflow_admin_password: "CHANGE_ME"

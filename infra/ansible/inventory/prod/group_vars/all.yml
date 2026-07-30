@@ -1,0 +1,37 @@
+# Non-secret configuration for the Airflow/MLflow VM. Secrets live in vault.yml
+# (encrypted with ansible-vault) — see vault.yml.example.
+
+# ── GCP ──────────────────────────────────────────────────────────────────────
+gcp_region: "us-central1"
+cloudsql_connection_name: "project-57f7ef9a-6059-4068-ae7:us-central1:fraud-detection"
+artifact_registry_host: "us-central1-docker.pkg.dev"
+
+# ── Where the stack is deployed on the VM ────────────────────────────────────
+app_dir: "/opt/airflow-stack"
+# Path to the repo's airflow/ build context on the CONTROL node (copied to the VM).
+airflow_src_dir: "{{ playbook_dir }}/../../../airflow"
+
+# ── Database (reached through the cloud-sql-proxy compose service) ────────────
+postgres_host: "cloud-sql-proxy"
+postgres_port: 5432
+postgres_db: "fraud-detection"      # app / Feast database
+mlflow_db: "mlflow"                  # MLflow backend store database
+airflow_db: "airflow"               # Airflow metadata database
+
+# ── Memorystore Redis (online feature store) ─────────────────────────────────
+# terraform output -raw redis_host
+redis_host: "10.102.22.67"
+redis_port: 6379
+
+# ── Storage ──────────────────────────────────────────────────────────────────
+model_storage_bucket_name: "fraud-detection-modelss"
+
+# ── Airflow runtime ──────────────────────────────────────────────────────────
+airflow_uid: 50000
+airflow_image_tag: "3.2.2"
+
+# ── System ───────────────────────────────────────────────────────────────────
+timezone: "Asia/Ho_Chi_Minh"
+# Configure docker to authenticate to Artifact Registry (only needed to push/pull
+# app images from AR; the airflow stack itself builds locally).
+configure_artifact_registry_auth: true

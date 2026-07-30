@@ -1,0 +1,13 @@
+---
+# Re-apply the stack when the build context, code, or .env changed. docker
+# compose only restarts the services whose config/image actually changed.
+- name: Restart airflow stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ app_dir }}"
+    state: present
+    build: "{{ airflow_compose_build }}"
+    remove_orphans: true
+  become: true
+  become_user: "{{ ansible_user }}"
+  environment:
+    AIRFLOW_UID: "{{ airflow_uid }}"

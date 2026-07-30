@@ -1,0 +1,93 @@
+# =====================================================================
+# Config cho generator (lịch sử + streaming).
+#
+#   uv run python data_pipelines/generator/generate_offline.py   # lịch sử 1 năm
+#   uv run python data_pipelines/generator/generate_stream.py    # live -> Kafka
+#
+# Mọi tham số điều khiển "chất lượng data" nằm ở đây (rubric: using generator
+# configuration). Secret (MinIO/Postgres user-pass) lấy từ data_pipelines/.env.
+# =====================================================================
+
+seed: 42
+
+# --- Quy mô entity (reference data -> ops.{users,cards,merchants,devices}) ---
+entities:
+  users: 25000
+  merchants: 1500
+  devices: 30000
+  # số card/user do generator quyết định (1-3), không chỉnh ở đây
+
+# --- Cửa sổ transactions lịch sử -------------------------------------------
+transactions:
+  count: 300000
+  start_date: "2025-07-27"     # lịch sử: 27/07/2025 -> 28/07/2026 (367 ngày)
+  end_date:   "2026-07-29"     # EXCLUSIVE -> partition cuối là 2026-07-28
+  fraud_rate: 0.005            # tỉ lệ fraud THẬT (labeled rate ~0.5% sau noise)
+  difficulty: full             # full = overlap + label noise thật
+  patterns: [card_testing, account_takeover, bust_out, fraud_ring]
+
+# --- Bốn lỗi data cố tình tiêm (áp lên transactions) -----------------------
+dirty:
+  # 1) Duplicate: nhân bản y hệt (cùng id) một phần dòng.
+  #    Sống được vì ops.transactions CỐ Ý không có primary key.
+  duplicate_rate: 0.01
+
+  # 2) Skew: ~80% giao dịch ở US -> key lệch điển hình cho Spark
+  skew:
+    us_share: 0.80
+
+  # 3) Schema evolution: cột mới chỉ xuất hiện từ cutover_date trở đi;
+  #    partition cũ KHÔNG có cột này -> mergeSchema phải xử lý
+  schema_evolution:
+    new_column: auth_3ds_flag
+    cutover_date: "2026-05-01"
+
+  # 4) High cardinality: device_id/card_id vốn đã cardinality cao -> chỉ đo.
+
+# --- Streaming (live -> Redpanda) ------------------------------------------
+# Nguyên tắc quan trọng: NHỊP streaming phải khớp nhịp lịch sử.
+#   300.000 / 367 ngày ~ 817 giao dịch/ngày.
+# Nếu cho streaming chạy 20 msg/s (=1,7 triệu/ngày) thì merch_*_10min lúc serve
+# sẽ lớn gấp hàng nghìn lần lúc train -> model vô dụng. Nên để daily_count tự
+# suy từ transactions.count.
+streaming:
+  daily_count: null            # null = transactions.count / số ngày lịch sử
+  speedup: 1                   # 1 = thời gian thật; >1 nén lại để demo nhanh
+
+  # BURST không tiêm nhân tạo. Ở nhịp ~817/ngày (0,0095 msg/s) thì một "spike
+  # x10 trong 5 giây" chỉ thêm 0,5 message — không đo được. Burst THẬT trong hệ
+  # này đến từ archetype card_testing: 12-45 giao dịch cách nhau 4-90 giây trên
+  # CÙNG một thẻ và CÙNG một merchant. Đó đúng là thứ velocity 5 phút và Flink
+  # phải bắt được, nên nó là burst có ý nghĩa duy nhất.
+
+  # 2) late arrival: message tới MUỘN hơn event-time của nó.
+  #    Event-time giữ nguyên (thời điểm giao dịch thật), chỉ thời điểm GỬI bị
+  #    đẩy về sau -> đúng nghĩa "hàng về muộn" mà watermark Flink phải chịu.
+  late_rate: 0.05
+  late_delay_min_sec: 5
+  late_delay_max_sec: 60       # < watermark Flink (90s) -> vẫn kịp vào window
+
+  # 3) duplicate: gửi lại y hệt (trùng id) -> Flink dedup + Spark dropDuplicates
+  duplicate_rate: 0.015
+
+# --- Reference data thay đổi theo ngày (để SCD Type 2 có việc làm) ---------
+# Mỗi khi luồng streaming sang ngày mới, generator sửa một ít thuộc tính trong
+# ops.* . Hôm sau DP0 export snapshot mới, DP2 so với bản đang current ở Gold ->
+# đóng version cũ, mở version mới. Không có phần này thì mỗi thực thể chỉ có
+# đúng 1 version và SCD2 tồn tại mà không chứng minh được gì.
+dim_churn:
+  users_per_day: 40            # đổi country_code / kyc_level / email_verified
+  cards_per_day: 15            # thẻ chuyển sang virtual
+  merchants_per_day: 10        # team risk đánh giá lại risk_level
+
+# --- Postgres (transactions + reference -> ops, labels -> warehouse) -------
+postgres:
+  host: "localhost"          # từ host; trong container dùng "postgres"
+  port: 5432
+  ops_db: "opsdb"            # ops.transactions + ops.{users,cards,merchants,devices}
+  warehouse_db: "warehouse"  # application.labels
+
+# --- Kafka ------------------------------------------------------------------
+kafka:
+  bootstrap: "localhost:9092"   # từ host; trong container dùng "redpanda:29092"
+  topic: "transactions"

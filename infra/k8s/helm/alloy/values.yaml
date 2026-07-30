@@ -4,8 +4,9 @@ alloy:
   image: grafana/alloy:v1.7.1
   replicas: 1
   resources:
+    # DaemonSet (1/node) — a log shipper idles low; 50m CPU is plenty.
     requests:
-      cpu: "100m"
+      cpu: "50m"
       memory: "128Mi"
     limits:
       cpu: "300m"

@@ -1,0 +1,13 @@
+# Local state (remote GCS backend is authoritative)
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Secrets — never commit real values
+*.auto.tfvars
+!*.auto.tfvars.example
+secrets.tfvars
+crash.log
+override.tf
+override.tf.json

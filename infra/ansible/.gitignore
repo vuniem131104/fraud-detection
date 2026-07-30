@@ -1,0 +1,11 @@
+# Never commit the decrypted/real vault (keep the .example)
+inventory/*/group_vars/vault.yml
+inventory/*/group_vars/*/vault.yml
+
+# Installed collections/roles
+collections/
+roles/external/
+
+*.retry
+*.log
+.vault_pass

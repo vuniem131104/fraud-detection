@@ -1,0 +1,22 @@
+---
+# Configure the Compute Engine VM and deploy the Airflow + MLflow + Cloud SQL
+# Proxy docker-compose stack onto it.
+#
+# Run:
+#   cd infra/ansible
+#   ansible-galaxy collection install -r requirements.yml
+#   ansible-playbook playbooks/site.yml --ask-vault-pass
+- name: Provision Airflow/MLflow VM
+  hosts: airflow_mlflow
+  become: true
+  vars_files:
+    - ../inventory/prod/group_vars/vault.yml
+  roles:
+    - role: common
+      tags: [common]
+    - role: docker
+      tags: [docker]
+    - role: gcp
+      tags: [gcp]
+    - role: airflow_stack
+      tags: [airflow, mlflow, deploy]

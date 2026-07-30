@@ -1,0 +1,5 @@
+---
+# Group membership only applies to new sessions; drop the persistent SSH socket
+# so subsequent tasks (compose) pick up the docker group.
+- name: Reset ssh connection
+  ansible.builtin.meta: reset_connection

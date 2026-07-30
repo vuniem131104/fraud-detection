@@ -14,12 +14,15 @@ api:
     pullPolicy: Always
   port: 1311
   resources:
+    # Right-sized 2026-07-14: idle usage is ~10m CPU / ~400Mi; the old 1000m/1Gi
+    # request reserved ~20x the real CPU. Request is the scheduling floor; the
+    # limit still allows bursts. HPA (below) handles real load.
     requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
       cpu: "1000m"
       memory: "1Gi"
-    limits:
-      cpu: "2000m"
-      memory: "2Gi"
 
 cloudSqlProxy:
   image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.22.1

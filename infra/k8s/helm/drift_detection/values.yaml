@@ -14,8 +14,10 @@ api:
     pullPolicy: Always
   port: 8001
   resources:
+    # CPU trimmed 250m->100m (idle). Memory kept at 512Mi: the API loads the
+    # baseline parquet into memory, so leave headroom.
     requests:
-      cpu: "250m"
+      cpu: "100m"
       memory: "512Mi"
     limits:
       cpu: "1000m"

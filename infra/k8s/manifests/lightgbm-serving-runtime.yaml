@@ -1,0 +1,33 @@
+# ClusterServingRuntime the serving chart's InferenceService selects via
+# `runtime: kserve-mlserver` (modelFormat: lightgbm, protocol v2). Apply this
+# BEFORE `helm install serving` — the InferenceService fails to schedule without it.
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-mlserver
+spec:
+  protocolVersions:
+    - v2
+  supportedModelFormats:
+    - name: lightgbm
+      version: "4"
+      autoSelect: true
+      priority: 2
+    - name: sklearn
+      version: "1"
+      autoSelect: true
+      priority: 2
+  containers:
+    - name: kserve-container
+      image: docker.io/seldonio/mlserver:1.6.1
+      env:
+        - name: MLSERVER_HTTP_PORT
+          value: "8080"
+        - name: MLSERVER_GRPC_PORT
+          value: "9000"
+        - name: MODELS_DIR
+          value: /mnt/models
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi

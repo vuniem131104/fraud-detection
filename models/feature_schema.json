@@ -1,16 +1,13 @@
 {
-  "version": 1,
-  "offline_source": "feast::fraud_detection_service",
-  "feature_view": "transaction_features",
+  "version": 2,
+  "offline_source": "warehouse::application.feat_training + feat_card_velocity",
+  "online_source": "feast::fraud_detection_service",
   "label_table": "application.labels",
   "target": "label",
   "feature_columns": [
     "amount_usd",
-    "log_amount",
-    "hour",
-    "weekday",
-    "is_night",
     "channel",
+    "auth_3ds_flag",
     "card_brand",
     "card_type",
     "is_virtual",
@@ -19,21 +16,25 @@
     "email_verified",
     "merchant_category",
     "merchant_risk_level",
-    "account_age_days",
-    "card_age_days",
+    "card_tx_count_90d",
+    "card_amount_sum_90d",
+    "card_amount_avg_90d",
+    "user_device_count_30d",
+    "device_distinct_users_30d",
+    "cd_tx_count_90d",
+    "card_is_new_device_90d",
+    "card_tx_count_5min",
+    "card_amount_sum_5min",
+    "card_amount_avg_5min",
+    "log_amount",
+    "hour",
+    "weekday",
+    "is_night",
     "geo_mismatch",
     "foreign_ip",
     "recipient_differs",
-    "card_tx_count_1h",
-    "card_tx_count_24h",
-    "card_amount_sum_24h",
-    "card_seconds_since_last_tx",
-    "card_amount_zscore",
-    "card_tx_seq",
-    "card_declines_24h",
-    "user_tx_count_24h",
-    "user_amount_sum_24h",
-    "user_seconds_since_last_tx"
+    "account_age_days",
+    "card_age_days"
   ],
   "categorical_features": [
     "channel",
@@ -42,7 +43,9 @@
     "customer_segment",
     "merchant_category",
     "is_virtual",
-    "email_verified"
+    "email_verified",
+    "auth_3ds_flag",
+    "card_is_new_device_90d"
   ],
   "categorical_encoders": {
     "channel": {
@@ -86,15 +89,34 @@
     "email_verified": {
       "False": 0,
       "True": 1
+    },
+    "auth_3ds_flag": {
+      "False": 0,
+      "True": 1,
+      "missing": 2
+    },
+    "card_is_new_device_90d": {
+      "False": 0,
+      "True": 1
     }
   },
+  "on_demand_features": [
+    "log_amount",
+    "hour",
+    "weekday",
+    "is_night",
+    "geo_mismatch",
+    "foreign_ip",
+    "recipient_differs",
+    "account_age_days",
+    "card_age_days"
+  ],
   "lgb_params": {
     "objective": "binary",
     "metric": [
       "average_precision",
       "auc"
     ],
-    "boosting_type": "gbdt",
     "learning_rate": 0.02,
     "num_leaves": 128,
     "min_child_samples": 100,
@@ -105,6 +127,7 @@
     "lambda_l2": 0.1,
     "verbose": -1,
     "n_jobs": -1,
-    "seed": 42
+    "seed": 42,
+    "scale_pos_weight": 204.30736301369862
   }
 }

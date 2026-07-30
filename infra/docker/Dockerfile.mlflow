@@ -1,0 +1,19 @@
+# =====================================================================
+# MLflow tracking server + driver Postgres.
+#
+# Image chính thức của MLflow không kèm driver Postgres, mà backend store của
+# ta là Postgres (không dùng SQLite để nhiều tiến trình ghi được và dữ liệu
+# sống qua restart). Cài thêm psycopg2-binary là đủ.
+#
+# Build tự động qua docker-compose (service `mlflow`).
+# =====================================================================
+
+FROM ghcr.io/mlflow/mlflow:v3.12.0
+
+# psycopg2-binary: driver cho --backend-store-uri postgresql+psycopg2://...
+RUN pip install --no-cache-dir psycopg2-binary==2.9.10
+
+# nơi chứa artifact khi bật --serve-artifacts (mount volume vào đây)
+RUN mkdir -p /mlflow/artifacts
+
+EXPOSE 5000
