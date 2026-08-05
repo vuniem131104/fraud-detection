@@ -3,6 +3,6 @@
   "implementation": "mlserver_lightgbm.LightGBMModel",
   "parameters": {
     "uri": "./model.bst",
-    "version": "44a70cac"
+    "version": "bb5000a2"
   }
 }

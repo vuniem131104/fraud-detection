@@ -1,49 +1,4 @@
 services:
-  # lgbserver:
-  #   image: kserve/lgbserver:latest
-  #   container_name: lightgbm-lgbserver
-  #   env_file:
-  #     - ../../.env
-  #   ports:
-  #     - "8085:9080"
-  #   volumes:
-  #     - ../../models:/mnt/models:ro
-  #   command:
-  #     - --model_dir
-  #     - /mnt/models
-  #     - --model_name
-  #     - fraud-detection
-  #     - --http_port
-  #     - "9080"
-  #     - --workers
-  #     - "${KSERVE_WORKERS:-5}"
-  #     - --nthread
-  #     - "${KSERVE_THREADS_PER_WORKER:-1}"
-
-  # postgres:
-  #   image: postgres:16
-  #   env_file:
-  #     - ../../.env
-  #   environment:
-  #     TZ: Asia/Ho_Chi_Minh
-  #     PGTZ: Asia/Ho_Chi_Minh
-  #   command: ["postgres", "-c", "timezone=Asia/Ho_Chi_Minh"]
-  #   ports: ["5432:5432"]
-  #   volumes:
-  #     - pgdata:/var/lib/postgresql/data
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
-
-  # ===================================================================
-  # MLflow — tracking server + model registry
-  #   UI / API : http://localhost:5000   (khớp MLFLOW_TRACKING_URI trong .env)
-  #   Backend  : Postgres riêng ở cổng 5433 (5432 đã bị stack data_pipelines dùng)
-  #   Artifact : volume mlflow-artifacts, phục vụ qua --serve-artifacts nên
-  #              client không cần tự truy cập đường dẫn lưu trữ
-  # ===================================================================
   mlflow-postgres:
     image: postgres:16
     container_name: mlflow-postgres
@@ -55,7 +10,7 @@ services:
       PGTZ: Asia/Ho_Chi_Minh
     command: ["postgres", "-c", "timezone=Asia/Ho_Chi_Minh"]
     ports:
-      - "5433:5432"   # cổng khác 5432 để chạy song song với Postgres của data pipeline
+      - "5433:5432"   
     volumes:
       - mlflow-pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -95,24 +50,6 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  redis:
-    image: redis:7.2-alpine
-    environment:
-      TZ: Asia/Ho_Chi_Minh
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    restart: unless-stopped
-
 volumes:
-  pgdata:
-  redis-data:
-  mlflow-pgdata:      # backend store của MLflow (experiment, run, registry)
-  mlflow-artifacts:   # model artifact do MLflow phục vụ
+  mlflow-pgdata:     
+  mlflow-artifacts:   

@@ -19,8 +19,8 @@ Hệ có **hai giai đoạn** dùng chung một đích:
 ```mermaid
 flowchart TB
     subgraph GEN["Sinh dữ liệu"]
-        G1["generate_offline.py<br/>27/07/2025 → 28/07/2026<br/>300k giao dịch"]
-        G2["generate_stream.py<br/>từ 29/07/2026, chạy liên tục"]
+        G1["generate_offline.py<br/>27/07/2025 → 29/07/2026<br/>300k giao dịch"]
+        G2["generate_stream.py<br/>từ 30/07/2026, chạy liên tục"]
     end
 
     subgraph DATA["TEAM DATA — opsdb (schema ops)"]
@@ -58,7 +58,7 @@ flowchart TB
     K --> FLINK --> BR --> RDS
     OPS --> DP0 --> SRC
     SRC --> DP1 --> BRZ --> DP2 --> SLV
-    DP2 --> GLDglpat-PxJDhKk5SHaBopEH2BAm
+    DP2 --> GLD
 
     GLD --> DP3 --> PG
     PG -->|feast materialize<br/>CHỈ view batch| RDS
@@ -193,7 +193,7 @@ Vì sao mỗi feature "graph" chọn chiều đó:
 Đây là phát hiện quan trọng nhất khi thiết kế lại, và nó thuộc về **generator** chứ
 không thuộc về pipeline.
 
-Tính thử: `300.000 / 367 ngày ≈ 817 giao dịch/ngày`, chia cho 1500 merchant =
+Tính thử: `300.000 / 368 ngày ≈ 815 giao dịch/ngày`, chia cho 1500 merchant =
 **0,5 giao dịch/merchant/ngày**. Xác suất một merchant có ≥2 giao dịch trong cùng 10
 phút gần như bằng 0 → `merch_tx_count_10min` sẽ là hằng số 1 → model bỏ qua hoàn
 toàn → toàn bộ job Flink vô nghĩa.
@@ -377,7 +377,7 @@ device thì ngưỡng cũ để device "trông như fraud ring" thêm **68 phút
 ngừng.
 
 `grace = 180s` là phần duy nhất đặt tay, và là một **đánh đổi**: watermark chỉ tiến
-khi có message tới, nên ở nhịp ~817 giao dịch/ngày (ban đêm thưa hơn ~16 lần) nó có
+khi có message tới, nên ở nhịp ~815 giao dịch/ngày (ban đêm thưa hơn ~16 lần) nó có
 thể đứng yên vài phút → grace quá nhỏ sẽ gate bỏ giá trị đúng; quá lớn thì đuôi dài
 ra. Chọn 180s vì **trong lúc bị tấn công** chính entity đó sinh traffic dày (gap
 4–90 giây) nên watermark tiến đều và age chỉ ~150–250s — giá trị lúc **cần đúng
@@ -467,9 +467,10 @@ thủ công nào — nếu có thì `down -v` sẽ mất và không dựng lại
 uv run python data_pipelines/generator/generate_offline.py
 
 # (2) team data export cả năm ra MinIO source  (1 query, ~1 phút)
+#     --to lấy đúng partition cuối mà bước (1) in ra ở dòng "Bước tiếp"
 docker compose exec -e MINIO_ENDPOINT=minio:9000 airflow-scheduler \
   bash -lc 'cd /opt/airflow/code && python -m include.ops_to_source \
-    --from 2025-07-27 --to 2026-07-28'
+    --from 2025-07-27 --to 2026-07-29'
 
 # (3) DP1 — copy source -> raw. Backfill toàn bộ nên dùng copy_dataset
 docker compose exec airflow-scheduler python - <<'PY'
@@ -481,7 +482,14 @@ for d in ["transactions", "users", "cards", "merchants", "devices"]:
 PY
 
 # (4) DP2 — Bronze -> Silver -> Gold
-SPARK='docker compose exec -T spark-master /opt/spark/bin/spark-submit
+#     spark-master KHÔNG có env_file (chỉ airflow-* có) nên cred phải truyền bằng
+#     -e, đúng như SPARK_SUBMIT trong dags/ml_pipeline.py. Thiếu -> KeyError
+#     'MINIO_ROOT_USER' ngay lúc build_spark().
+set -a; . .env; set +a
+SPARK='docker compose exec -T
+  -e MINIO_ROOT_USER='"$MINIO_ROOT_USER"' -e MINIO_ROOT_PASSWORD='"$MINIO_ROOT_PASSWORD"'
+  -e PG_USER='"$AIRFLOW_USER"' -e PG_PASSWORD='"$AIRFLOW_PASSWORD"'
+  spark-master /opt/spark/bin/spark-submit
   --master spark://spark-master:7077
   --packages org.apache.hadoop:hadoop-aws:3.3.4,org.postgresql:postgresql:42.7.4
   --conf spark.jars.ivy=/tmp/.ivy2'
@@ -502,6 +510,19 @@ docker compose exec airflow-scheduler bash -lc \
      --views card_features --views user_features \
      --views merchant_features --views device_features'
 ```
+
+Kiểm tra nhanh sau bước (6): `redis-cli DBSIZE` phải bằng đúng tổng số dòng của 4
+bảng `feat_*` (một key cho mỗi entity, không cộng dồn) — ở quy mô hiện tại là
+`27.494 + 25.000 + 30.000 + 1.500 = 83.994`.
+
+> **PYTHONPATH phải chứa `shared` và `feature_store`** (đã đặt trong
+> `docker-compose.yml`). `udf` của ODFV được dill pickle vào registry **theo tham
+> chiếu module**, nên mọi client mở registry — `feast materialize`,
+> `get_online_features` — unpickle nó **trước** khi parse repo. Thiếu path thì lỗi
+> là `ModuleNotFoundError: No module named 'feature_windows'` (hoặc
+> `'feature_views'`), không liên quan gì tới Redis hay Postgres. Đừng dựa vào
+> `sys.path.insert` trong `feature_views.py` hay vào việc cwd tình cờ là
+> `/opt/airflow/feature_store`.
 
 Rồi mở `scripts/training/model_training.ipynb` — nó đọc `feat_training ⋈ labels`,
 tính ODFV bằng đúng công thức của `txn_on_demand`, train LightGBM và đăng ký lên
@@ -525,11 +546,13 @@ docker compose ps stream-generator ops-ingest feature-bridge
 #   ml_pipeline        00:15  (team ML: dp1 -> dp2 -> dp3)
 ```
 
-Bù một ngày bị thiếu (ví dụ 28/07 đã qua nên không sinh live được):
+Bù một ngày bị thiếu — ngày nằm sau `end_date` của lịch sử nhưng đã qua nên không
+sinh live được nữa (lịch sử hiện tới 29/07/2026, live bắt đầu 30/07/2026, nên khe
+này chỉ xuất hiện nếu để hệ nghỉ vài ngày):
 
 ```bash
 docker compose exec stream-generator \
-  python generate_stream.py --bootstrap redpanda:29092 --date 2026-07-28 --drain
+  python generate_stream.py --bootstrap redpanda:29092 --date 2026-07-30 --drain
 ```
 
 Demo nhanh (nén 1 ngày còn 24 phút):
