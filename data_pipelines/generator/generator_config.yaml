@@ -19,9 +19,9 @@ entities:
 
 # --- Cửa sổ transactions lịch sử -------------------------------------------
 transactions:
-  count: 300000
-  start_date: "2025-07-27"     # lịch sử: 27/07/2025 -> 28/07/2026 (367 ngày)
-  end_date:   "2026-07-29"     # EXCLUSIVE -> partition cuối là 2026-07-28
+  count: 100000
+  start_date: "2026-04-04"     # lịch sử: 27/07/2025 -> 29/07/2026 (368 ngày)
+  end_date:   "2026-08-05"     # EXCLUSIVE -> partition cuối là 2026-07-29
   fraud_rate: 0.005            # tỉ lệ fraud THẬT (labeled rate ~0.5% sau noise)
   difficulty: full             # full = overlap + label noise thật
   patterns: [card_testing, account_takeover, bust_out, fraud_ring]
@@ -40,13 +40,13 @@ dirty:
   #    partition cũ KHÔNG có cột này -> mergeSchema phải xử lý
   schema_evolution:
     new_column: auth_3ds_flag
-    cutover_date: "2026-05-01"
+    cutover_date: "2026-07-01"
 
   # 4) High cardinality: device_id/card_id vốn đã cardinality cao -> chỉ đo.
 
 # --- Streaming (live -> Redpanda) ------------------------------------------
 # Nguyên tắc quan trọng: NHỊP streaming phải khớp nhịp lịch sử.
-#   300.000 / 367 ngày ~ 817 giao dịch/ngày.
+#   300.000 / 368 ngày ~ 815 giao dịch/ngày.
 # Nếu cho streaming chạy 20 msg/s (=1,7 triệu/ngày) thì merch_*_10min lúc serve
 # sẽ lớn gấp hàng nghìn lần lúc train -> model vô dụng. Nên để daily_count tự
 # suy từ transactions.count.

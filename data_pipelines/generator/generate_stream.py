@@ -71,9 +71,14 @@ PLAN_HORIZON_DAYS = 45
 
 
 def make_producer(bootstrap: str) -> Producer:
-    """Kafka producer trỏ Redpanda."""
-    return Producer({"bootstrap.servers": bootstrap, "linger.ms": 20,
-                     "compression.type": "snappy"})
+    """Kafka producer — Redpanda plaintext (local) hoặc Managed Kafka (GCP).
+
+    Phần bảo mật lấy từ ``ops_store.kafka_client_config``; mặc định PLAINTEXT nên
+    ở local không đổi gì.
+    """
+    return Producer(ops_store.kafka_client_config(
+        **{"bootstrap.servers": bootstrap, "linger.ms": 20,
+           "compression.type": "snappy"}))
 
 
 def daily_count(cfg: dict) -> int:
@@ -209,8 +214,8 @@ def run(cfg: dict, args: argparse.Namespace) -> int:
     plan = build_schedule(
         plan_day(cfg, entities, day, cfg["seed"] + int(day.replace("-", ""))),
         scfg, rng, counter)
-    print(f"Bắn vào {bootstrap} topic='{topic}' | speedup=x{speedup:g} | "
-          f"{len(plan):,} message trong lịch")
+    print(f"Bắn vào {bootstrap} ({ops_store.kafka_describe()}) topic='{topic}' | "
+          f"speedup=x{speedup:g} | {len(plan):,} message trong lịch")
 
     sent = late_drain = 0
     t_report = time.time()

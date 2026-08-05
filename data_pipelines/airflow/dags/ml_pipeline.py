@@ -58,16 +58,107 @@ DIMS = ["users", "cards", "merchants", "devices"]
 DS_HCM = ('{{ (logical_date - macros.timedelta(days=1))'
           '.in_timezone("Asia/Ho_Chi_Minh").strftime("%Y-%m-%d") }}')
 
+# --- Spark chạy ở đâu ------------------------------------------------------
+# local    : cụm Spark standalone trong docker-compose.yml, gọi qua `docker exec`
+# dataproc : Dataproc Serverless (docker-compose.gcp.yml — VM không có Spark)
+#
+# Cùng một file job .py chạy được cả hai nơi vì đường dẫn data lake lấy từ
+# LAKE_ROOT (xem include/lake.py) chứ không hardcode s3a://.
+SPARK_RUNTIME = os.environ.get("SPARK_RUNTIME", "local").lower()
+
 SPARK_SUBMIT = (
     'docker exec '
     '-e MINIO_ROOT_USER="$MINIO_ROOT_USER" -e MINIO_ROOT_PASSWORD="$MINIO_ROOT_PASSWORD" '
     '-e PG_USER="$AIRFLOW_USER" -e PG_PASSWORD="$AIRFLOW_PASSWORD" '
+    '-e LAKE_ROOT="$LAKE_ROOT" '
     'spark-master /opt/spark/bin/spark-submit '
     '--master spark://spark-master:7077 '
     '--packages org.apache.hadoop:hadoop-aws:3.3.4,org.postgresql:postgresql:42.7.4 '
     '--conf spark.jars.ivy=/tmp/.ivy2 '
 )
 JOBS = "/opt/spark/jobs"
+
+# --- Dataproc Serverless ---------------------------------------------------
+# Job .py phải nằm trên GCS (Dataproc không thấy volume của VM). Deploy code =
+# gsutil rsync spark/jobs/ -> $DATAPROC_CODE_ROOT/
+DATAPROC_CODE_ROOT = os.environ.get("DATAPROC_CODE_ROOT", "")
+DATAPROC_REGION = os.environ.get("DATAPROC_REGION", os.environ.get("GCP_REGION", ""))
+
+
+def _dataproc_batch(script: str, args: list[str]) -> dict:
+    """Cấu hình một PySpark batch trên Dataproc Serverless.
+
+    Hai thứ BẮT BUỘC ship kèm, thiếu là job chết ngay:
+      * ``python_file_uris``  -> shared/feature_windows.py. dp3_* import module này
+        qua SHARED_DIR, thứ chỉ tồn tại vì docker-compose mount ./shared. Trên
+        Dataproc không có mount nào.
+      * ``jar_file_uris``     -> driver JDBC Postgres. Bản local lấy qua
+        --packages, nhưng Dataproc Serverless không có internet ra Maven trừ khi
+        cấu hình thêm, nên đưa jar lên GCS là chắc ăn hơn.
+
+    Env của job truyền bằng ``spark.dataproc.driverEnv.*``: các job đọc os.environ
+    (LAKE_ROOT, PG_*), mà Dataproc Serverless không có cách nào khác để set env.
+    """
+    props = {
+        f"spark.dataproc.driverEnv.{k}": v
+        for k, v in {
+            "LAKE_ROOT": os.environ.get("LAKE_ROOT", ""),
+            "PG_HOST": os.environ.get("PG_HOST", ""),
+            "PG_DB": os.environ.get("WAREHOUSE_POSTGRES_DB", "warehouse"),
+            "PG_USER": os.environ.get("AIRFLOW_USER", ""),
+            # CẢNH BÁO: property của batch đọc được bằng `gcloud dataproc batches
+            # describe`. Với môi trường thật hãy chuyển sang Secret Manager thay
+            # vì truyền mật khẩu ở đây.
+            "PG_PASSWORD": os.environ.get("AIRFLOW_PASSWORD", ""),
+        }.items() if v
+    }
+    exec_cfg = {
+        k: v for k, v in {
+            "service_account": os.environ.get("DATAPROC_SERVICE_ACCOUNT", ""),
+            "subnetwork_uri": os.environ.get("DATAPROC_SUBNET", ""),
+        }.items() if v
+    }
+    batch: dict = {
+        "pyspark_batch": {
+            "main_python_file_uri": f"{DATAPROC_CODE_ROOT.rstrip('/')}/{script}",
+            "args": args,
+        },
+        "runtime_config": {"properties": props},
+    }
+    if pyfiles := os.environ.get("DATAPROC_PYFILES", ""):
+        batch["pyspark_batch"]["python_file_uris"] = pyfiles.split(",")
+    if jars := os.environ.get("DATAPROC_JDBC_JAR", ""):
+        batch["pyspark_batch"]["jar_file_uris"] = jars.split(",")
+    if exec_cfg:
+        batch["environment_config"] = {"execution_config": exec_cfg}
+    return batch
+
+
+def spark_task(task_id: str, script: str, *args: str):
+    """Một task Spark, không phụ thuộc nơi chạy.
+
+    Trả về BashOperator (local) hoặc DataprocCreateBatchOperator (GCP). Nhờ vậy
+    hai TaskGroup dp2/dp3 bên dưới KHÔNG cần biết Spark đang ở đâu.
+    """
+    if SPARK_RUNTIME == "dataproc":
+        # import trong hàm: provider google chỉ cài trên image dùng cho GCP, bản
+        # local không có -> import ở module level sẽ làm DAG fail parse.
+        from airflow.providers.google.cloud.operators.dataproc import (
+            DataprocCreateBatchOperator,
+        )
+        return DataprocCreateBatchOperator(
+            task_id=task_id,
+            project_id=os.environ.get("GCP_PROJECT_ID", ""),
+            region=DATAPROC_REGION,
+            # batch_id chỉ nhận [a-z0-9-]: task_id có dấu _ nên phải đổi.
+            batch_id=(f"{task_id.replace('_', '-')}-"
+                      "{{ ts_nodash | lower }}-{{ try_number }}"),
+            batch=_dataproc_batch(script, list(args)),
+        )
+    return BashOperator(
+        task_id=task_id,
+        bash_command=f"{SPARK_SUBMIT} {JOBS}/{script} " + " ".join(args),
+    )
 
 # Mọi bảng feature phải có > 0 dòng. Đủ cho MVP, và quan trọng là nó CHẶN
 # materialize: đẩy một bảng rỗng lên Redis sẽ xoá sạch feature đang phục vụ.
@@ -147,37 +238,26 @@ def ml_pipeline():
     @task_group(group_id="dp2_transform")
     def dp2():
         """raw -> staging (Silver) -> curated (Gold) bằng Spark."""
-        bronze_to_silver = BashOperator(
-            task_id="bronze_to_silver",
-            bash_command=f"{SPARK_SUBMIT} {JOBS}/dp2_bronze_to_silver.py --date {DS_HCM}",
-        )
-        gold_fact = BashOperator(
-            task_id="gold_fact",
-            bash_command=(f"{SPARK_SUBMIT} {JOBS}/dp2_silver_to_gold.py "
-                          f"--stage fact --date {DS_HCM}"),
-        )
+        bronze_to_silver = spark_task(
+            "bronze_to_silver", "dp2_bronze_to_silver.py", "--date", DS_HCM)
+        gold_fact = spark_task(
+            "gold_fact", "dp2_silver_to_gold.py", "--stage", "fact", "--date", DS_HCM)
         # SCD2 đọc snapshot dim ở Bronze, không phụ thuộc Silver -> chạy song song
         # với gold_fact được. Nhưng DP3 cần CẢ HAI xong.
-        gold_dims = BashOperator(
-            task_id="gold_dims",
-            bash_command=f"{SPARK_SUBMIT} {JOBS}/dp2_silver_to_gold.py --stage dims",
-        )
+        gold_dims = spark_task(
+            "gold_dims", "dp2_silver_to_gold.py", "--stage", "dims")
         bronze_to_silver >> [gold_fact, gold_dims]
 
     # ------------------------------------------------------------------- DP3
     @task_group(group_id="dp3_features")
     def dp3():
         """curated -> Postgres (offline store) -> Redis (online store)."""
-        serving_features = BashOperator(
-            task_id="serving_features",
-            bash_command=f"{SPARK_SUBMIT} {JOBS}/dp3_gold_to_features.py --date {DS_HCM}",
-        )
+        serving_features = spark_task(
+            "serving_features", "dp3_gold_to_features.py", "--date", DS_HCM)
         # Bảng offline cho training: point-in-time từng giao dịch, gồm CẢ ba tầng
         # feature (batch + Flink 10'/1h + velocity 5'). Bảng này không lên Redis.
-        training_features = BashOperator(
-            task_id="training_features",
-            bash_command=f"{SPARK_SUBMIT} {JOBS}/dp3_training_features.py",
-        )
+        training_features = spark_task(
+            "training_features", "dp3_training_features.py")
         validate = BashOperator(task_id="validate", bash_command=VALIDATE)
         # CHỈ view batch. Materialize view của Flink sẽ ghi giá trị batch (chậm tới
         # 24h) lên giá trị real-time -> serving đọc số của đêm qua.

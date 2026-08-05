@@ -26,6 +26,11 @@ from datetime import datetime
 import psycopg
 from confluent_kafka import Consumer
 
+try:                        # chạy như package
+    from include import kafka_conf
+except ImportError:        # chạy trực tiếp trong include/
+    import kafka_conf
+
 COLS = ["id", "user_id", "card_id", "merchant_id", "device_id", "amount_usd",
         "currency", "channel", "billing_country_code", "ip_country_code",
         "email_purchaser", "email_recipient", "created_at", "auth_3ds_flag"]
@@ -41,13 +46,19 @@ def ops_dsn() -> str:
 
 
 def make_consumer(bootstrap: str, group: str, from_beginning: bool) -> Consumer:
-    """Consumer đọc topic transactions."""
-    return Consumer({
-        "bootstrap.servers": bootstrap,
-        "group.id": group,
-        "auto.offset.reset": "earliest" if from_beginning else "latest",
-        "enable.auto.commit": True,
-    })
+    """Consumer đọc topic transactions.
+
+    Phần bảo mật (SASL_SSL/OAUTHBEARER cho Managed Kafka) lấy từ
+    ``include.kafka_conf`` — local để mặc định PLAINTEXT nên không đổi hành vi.
+    """
+    return Consumer(kafka_conf.client_config(
+        **{
+            "bootstrap.servers": bootstrap,
+            "group.id": group,
+            "auto.offset.reset": "earliest" if from_beginning else "latest",
+            "enable.auto.commit": True,
+        }
+    ))
 
 
 def to_row(msg: dict) -> tuple:
@@ -77,7 +88,8 @@ def run(args: argparse.Namespace) -> int:
     """Đọc Kafka trong ``max_seconds`` giây, ghi batch xuống ops.transactions."""
     consumer = make_consumer(args.bootstrap, args.group, args.from_beginning)
     consumer.subscribe([args.topic])
-    print(f"Ingest: {args.topic} -> ops.transactions "
+    print(f"Ingest: {args.topic} -> ops.transactions | "
+          f"kafka={kafka_conf.describe()} "
           f"(batch={args.batch_size}, {args.max_seconds}s)")
 
     t0, buf, total = time.time(), [], 0
@@ -108,7 +120,7 @@ def run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     """CLI cho ingestion service."""
     p = argparse.ArgumentParser(description="Kafka transactions -> ops.transactions")
-    p.add_argument("--bootstrap", default=os.environ.get("KAFKA_BOOTSTRAP", "redpanda:29092"))
+    p.add_argument("--bootstrap", default=kafka_conf.bootstrap())
     p.add_argument("--topic", default="transactions")
     p.add_argument("--group", default="ops-ingest")
     p.add_argument("--batch-size", type=int, default=500)

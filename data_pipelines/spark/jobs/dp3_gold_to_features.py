@@ -43,18 +43,39 @@ sys.path.insert(0, os.environ.get("SHARED_DIR", "/opt/spark/shared"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared"))
 import feature_windows as W  # noqa: E402
 
-GOLD = "s3a://curated"
+# Đường dẫn data lake: MinIO ở local (s3a://), GCS trên GCP (gs://<bucket>/).
+# Một biến LAKE_ROOT quyết định cả scheme lẫn cách tổ chức bucket — xem
+# data_pipelines/airflow/include/lake.py. Job KHÔNG hardcode scheme nào để chạy
+# được cả trên cụm Spark local lẫn Dataproc Serverless.
+LAKE_ROOT = os.environ.get("LAKE_ROOT") or "s3a://"
+if not LAKE_ROOT.endswith("/"):
+    LAKE_ROOT += "/"
+
+GOLD = f"{LAKE_ROOT}curated"
 FACT = f"{GOLD}/fact_transactions"
 PG_SCHEMA = "application"
 
 
+def _base_builder():
+    """Builder với mọi cấu hình KHÔNG phụ thuộc backend storage."""
+    b = SparkSession.builder.appName("dp3_gold_to_features")
+    b = b.config("spark.sql.shuffle.partitions", "32")
+    return b
+
+
 def build_spark() -> SparkSession:
     """SparkSession cấu hình s3a (đọc Gold); JDBC Postgres cấu hình khi ghi."""
+    # GCS: Dataproc đã có gcs-connector và tự dùng service account của job, nên
+    # KHÔNG set gì thêm — và tuyệt đối không đọc MINIO_* (không tồn tại trên GCP,
+    # os.environ[...] sẽ ném KeyError trước khi job kịp chạy).
+    if LAKE_ROOT.startswith("gs://"):
+        return _base_builder().getOrCreate()
+
     ak = os.environ.get("AWS_ACCESS_KEY_ID") or os.environ["MINIO_ROOT_USER"]
     sk = os.environ.get("AWS_SECRET_ACCESS_KEY") or os.environ["MINIO_ROOT_PASSWORD"]
     endpoint = os.environ.get("MINIO_ENDPOINT", "http://minio:9000")
     return (
-        SparkSession.builder.appName("dp3_gold_to_features")
+        _base_builder()
         .config("spark.hadoop.fs.s3a.endpoint", endpoint)
         .config("spark.hadoop.fs.s3a.access.key", ak)
         .config("spark.hadoop.fs.s3a.secret.key", sk)
@@ -62,7 +83,6 @@ def build_spark() -> SparkSession:
         .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
         .config("spark.hadoop.fs.s3a.aws.credentials.provider",
                 "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
-        .config("spark.sql.shuffle.partitions", "32")
         .getOrCreate()
     )
 

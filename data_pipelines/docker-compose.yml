@@ -34,7 +34,12 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "600"
     AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: "600"
     TZ: Asia/Ho_Chi_Minh
-    PYTHONPATH: /opt/airflow/code
+    # shared + feature_store PHẢI nằm trên PYTHONPATH. udf của ODFV bị dill pickle
+    # vào registry THEO THAM CHIẾU tới module (feature_views, feature_windows), nên
+    # mọi client mở registry (materialize, get_online_features) đều unpickle nó
+    # TRƯỚC khi parse repo -> ModuleNotFoundError nếu chỉ dựa vào sys.path.insert
+    # trong feature_views.py hoặc vào cwd tình cờ là /opt/airflow/feature_store.
+    PYTHONPATH: /opt/airflow/code:/opt/airflow/shared:/opt/airflow/feature_store
     # Độ dài cửa sổ + danh sách view được materialize (module không phụ thuộc gì).
     # DAG và Feast repo đều đọc từ đây -> không hardcode hai nơi.
     SHARED_DIR: /opt/airflow/shared
@@ -327,7 +332,9 @@ services:
     env_file: [.env]
     working_dir: /opt/airflow/code
     environment:
-      PYTHONPATH: /opt/airflow/code
+      # Bridge mở registry Feast -> phải unpickle udf của ODFV, vốn tham chiếu tới
+      # module feature_views/feature_windows. Xem ghi chú ở airflow-common-env.
+      PYTHONPATH: /opt/airflow/code:/opt/airflow/shared:/opt/airflow/feature_store
       PYTHONUNBUFFERED: "1"
       FEAST_REPO_PATH: /opt/airflow/feature_store
       SHARED_DIR: /opt/airflow/shared
@@ -482,7 +489,9 @@ services:
     ports:
       - "8090:8080"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      # Airflow 3 chuyển health sang /api/v2/monitor/health; /health trả 404 nên
+      # container luôn "unhealthy" dù UI hoạt động bình thường.
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -510,9 +519,11 @@ services:
     <<: *airflow-common
     command: scheduler
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      # Cổng 8974 chỉ mở khi bật AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK. Hỏi trực
+      # tiếp metadata DB thay vì mở thêm một HTTP endpoint nữa.
+      test: ["CMD", "airflow", "jobs", "check", "--job-type", "SchedulerJob", "--local"]
       interval: 30s
-      timeout: 10s
+      timeout: 20s
       retries: 5
     depends_on:
       <<: *airflow-common-depends-on

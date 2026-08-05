@@ -231,3 +231,53 @@ def apply_dim_churn(cfg: dict, rng: random.Random) -> dict[str, int]:
                     conn.execute(sql, (entity_id,))
                 done[table] += 1
     return done
+
+
+# --------------------------------------------------------------------------- #
+# Kafka — bảo mật                                                             #
+# --------------------------------------------------------------------------- #
+# BẢN SAO CÓ CHỦ ĐÍCH của data_pipelines/airflow/include/kafka_conf.py.
+# Container stream-generator chỉ mount ./generator nên không import được
+# include/. Sửa một bên thì phải sửa bên kia — cả hai đều ngắn và ổn định.
+_GCP_KAFKA_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+
+def _oauth_token_cb(_config: str):
+    """Access token cho SASL/OAUTHBEARER của Managed Kafka (ADC trên VM GCP)."""
+    import google.auth
+    import google.auth.transport.requests
+
+    creds, _ = google.auth.default(scopes=[_GCP_KAFKA_SCOPE])
+    creds.refresh(google.auth.transport.requests.Request())
+    return creds.token, creds.expiry.timestamp()
+
+
+def kafka_client_config(**extra) -> dict:
+    """Config Producer/Consumer đã gộp phần bảo mật.
+
+    Mặc định PLAINTEXT -> không set gì thêm, giống hệt hành vi cũ ở local.
+    """
+    cfg: dict = {}
+    protocol = os.environ.get("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT").upper()
+    if protocol != "PLAINTEXT":
+        cfg["security.protocol"] = protocol
+        if ca := os.environ.get("KAFKA_SSL_CAFILE"):
+            cfg["ssl.ca.location"] = ca
+    if protocol.startswith("SASL"):
+        mechanism = os.environ.get("KAFKA_SASL_MECHANISM", "OAUTHBEARER").upper()
+        cfg["sasl.mechanisms"] = mechanism
+        if mechanism == "OAUTHBEARER":
+            cfg["oauth_cb"] = _oauth_token_cb
+        else:
+            cfg["sasl.username"] = os.environ.get("KAFKA_SASL_USERNAME", "")
+            cfg["sasl.password"] = os.environ.get("KAFKA_SASL_PASSWORD", "")
+    cfg.update(extra)
+    return cfg
+
+
+def kafka_describe() -> str:
+    """Mô tả một dòng để log (không lộ secret)."""
+    protocol = os.environ.get("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT").upper()
+    if protocol.startswith("SASL"):
+        protocol += f"/{os.environ.get('KAFKA_SASL_MECHANISM', 'OAUTHBEARER').upper()}"
+    return protocol

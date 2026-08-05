@@ -1,6 +1,6 @@
 """Nạp DỮ LIỆU LỊCH SỬ vào cơ sở dữ liệu vận hành của team data.
 
-Bước 1 của luồng. Sinh 1 năm giao dịch (27/07/2025 -> 28/07/2026) cùng reference
+Bước 1 của luồng. Sinh 1 năm giao dịch (27/07/2025 -> 29/07/2026) cùng reference
 data và ground truth, rồi ghi vào **Postgres**:
 
     ops.users / ops.cards / ops.merchants / ops.devices    (reference data)

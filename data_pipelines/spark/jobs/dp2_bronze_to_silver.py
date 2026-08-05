@@ -23,17 +23,38 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import BooleanType
 
-RAW = "s3a://raw/transactions"
-STG = "s3a://staging/transactions"
+# Đường dẫn data lake: MinIO ở local (s3a://), GCS trên GCP (gs://<bucket>/).
+# Một biến LAKE_ROOT quyết định cả scheme lẫn cách tổ chức bucket — xem
+# data_pipelines/airflow/include/lake.py. Job KHÔNG hardcode scheme nào để chạy
+# được cả trên cụm Spark local lẫn Dataproc Serverless.
+LAKE_ROOT = os.environ.get("LAKE_ROOT") or "s3a://"
+if not LAKE_ROOT.endswith("/"):
+    LAKE_ROOT += "/"
+
+RAW = f"{LAKE_ROOT}raw/transactions"
+STG = f"{LAKE_ROOT}staging/transactions"
+
+
+def _base_builder():
+    """Builder với mọi cấu hình KHÔNG phụ thuộc backend storage."""
+    b = SparkSession.builder.appName("dp2_bronze_to_silver")
+    b = b.config("spark.sql.sources.partitionOverwriteMode", "dynamic")
+    return b
 
 
 def build_spark() -> SparkSession:
-    """SparkSession cấu hình s3a trỏ vào MinIO."""
+    """SparkSession trỏ vào data lake — MinIO (s3a) hoặc GCS."""
+    # GCS: Dataproc đã có gcs-connector và tự dùng service account của job, nên
+    # KHÔNG set gì thêm — và tuyệt đối không đọc MINIO_* (không tồn tại trên GCP,
+    # os.environ[...] sẽ ném KeyError trước khi job kịp chạy).
+    if LAKE_ROOT.startswith("gs://"):
+        return _base_builder().getOrCreate()
+
     ak = os.environ.get("AWS_ACCESS_KEY_ID") or os.environ["MINIO_ROOT_USER"]
     sk = os.environ.get("AWS_SECRET_ACCESS_KEY") or os.environ["MINIO_ROOT_PASSWORD"]
     endpoint = os.environ.get("MINIO_ENDPOINT", "http://minio:9000")
     return (
-        SparkSession.builder.appName("dp2_bronze_to_silver")
+        _base_builder()
         .config("spark.hadoop.fs.s3a.endpoint", endpoint)
         .config("spark.hadoop.fs.s3a.access.key", ak)
         .config("spark.hadoop.fs.s3a.secret.key", sk)
@@ -41,8 +62,6 @@ def build_spark() -> SparkSession:
         .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
         .config("spark.hadoop.fs.s3a.aws.credentials.provider",
                 "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
-        # chỉ ghi đè partition có trong DF (an toàn cho incremental)
-        .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
         .getOrCreate()
     )
 

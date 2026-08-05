@@ -42,6 +42,11 @@ import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 
+try:                        # chạy như package (python -m include.ops_to_source)
+    from include import lake
+except ImportError:        # chạy trực tiếp trong thư mục include/
+    import lake
+
 # Mốc schema evolution: partition TRƯỚC ngày này không có cột auth_3ds_flag.
 CUTOVER = os.environ.get("SCHEMA_CUTOVER_DATE", "2026-05-01")
 NEW_COL = "auth_3ds_flag"
@@ -74,18 +79,18 @@ def ops_dsn() -> str:
             f"password={os.environ.get('POSTGRES_PASSWORD') or os.environ['AIRFLOW_PASSWORD']}")
 
 
-def get_s3fs() -> tuple[pafs.S3FileSystem, str]:
-    """S3FileSystem trỏ MinIO + tên bucket ``source``."""
-    fs = pafs.S3FileSystem(
-        access_key=os.environ["MINIO_ROOT_USER"],
-        secret_key=os.environ["MINIO_ROOT_PASSWORD"],
-        endpoint_override=os.environ.get("MINIO_ENDPOINT", "minio:9000"),
-        scheme="http", allow_bucket_creation=True,
-    )
-    return fs, os.environ.get("SOURCE_BUCKET", "source")
+def get_s3fs() -> tuple[pafs.FileSystem, str]:
+    """FileSystem của data lake + đường dẫn tầng ``source``.
+
+    Backend do ``LAKE_ROOT`` quyết định (MinIO ở local, GCS trên GCP) — xem
+    ``include/lake.py``. Giá trị thứ hai là đường dẫn ĐÃ resolve, nên mọi chỗ
+    dùng ``f"{bucket}/..."`` bên dưới không cần đổi.
+    """
+    layer = os.environ.get("SOURCE_BUCKET", "source")
+    return lake.filesystem(), lake.path(layer)
 
 
-def _write_parquet(fs: pafs.S3FileSystem, path: str, df: pd.DataFrame) -> None:
+def _write_parquet(fs: pafs.FileSystem, path: str, df: pd.DataFrame) -> None:
     """Ghi 1 file parquet.
 
     ``coerce_timestamps='us'``: Spark 3.5 không đọc được TIMESTAMP(NANOS), mà pandas
@@ -144,7 +149,7 @@ def export_day(date_str: str, quiet: bool = False) -> int:
     if not quiet:
         n_uni = df["id"].nunique()
         print(f"[dp0] {date_str}: {len(df):,} dòng -> "
-              f"s3://{bucket}/transactions/event_date={date_str}/part-0.parquet")
+              f"{lake.lake_root()}{bucket}/transactions/event_date={date_str}/part-0.parquet")
         print(f"      duplicate={len(df) - n_uni:,} ({1 - n_uni / len(df):.2%}) | "
               f"US={(df['billing_country_code'] == 'US').mean():.1%} | "
               f"card distinct={df['card_id'].nunique():,} | "
@@ -181,7 +186,7 @@ def export_range(from_date: str, to_date: str) -> int:
         if n_days % 60 == 0:
             print(f"      ... {n_days} ngày, {n_rows:,} dòng (tới {ds})")
     print(f"[dp0] transactions: {n_days} ngày, {n_rows:,} dòng "
-          f"-> s3://{bucket}/transactions/")
+          f"-> {lake.lake_root()}{bucket}/transactions/")
     return n_rows
 
 
@@ -202,8 +207,9 @@ def export_dims(quiet: bool = False) -> dict[str, int]:
             _write_parquet(fs, f"{bucket}/{name}/snapshot.parquet", df)
             counts[name] = len(df)
     if not quiet:
-        print("[dp0] dim snapshot -> s3://%s/: %s"
-              % (bucket, "  ".join(f"{k}={v:,}" for k, v in counts.items())))
+        print("[dp0] dim snapshot -> %s%s/: %s"
+              % (lake.lake_root(), bucket,
+                 "  ".join(f"{k}={v:,}" for k, v in counts.items())))
     return counts
 
 

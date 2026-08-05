@@ -40,6 +40,11 @@ import pandas as pd
 from confluent_kafka import Consumer
 from feast import FeatureStore
 
+try:                        # chạy như package
+    from include import kafka_conf
+except ImportError:        # chạy trực tiếp trong include/
+    import kafka_conf
+
 REPO = os.environ.get("FEAST_REPO_PATH", "/opt/airflow/feature_store")
 LOCAL_TZ = "Asia/Ho_Chi_Minh"
 
@@ -65,12 +70,14 @@ ROUTES = {
 
 def make_consumer(bootstrap: str, group: str, from_beginning: bool) -> Consumer:
     """Kafka consumer đọc mọi topic kết quả của Flink."""
-    return Consumer({
-        "bootstrap.servers": bootstrap,
-        "group.id": group,
-        "auto.offset.reset": "earliest" if from_beginning else "latest",
-        "enable.auto.commit": True,
-    })
+    return Consumer(kafka_conf.client_config(
+        **{
+            "bootstrap.servers": bootstrap,
+            "group.id": group,
+            "auto.offset.reset": "earliest" if from_beginning else "latest",
+            "enable.auto.commit": True,
+        }
+    ))
 
 
 def to_frame(route: dict, records: list[dict]) -> pd.DataFrame:
@@ -110,7 +117,8 @@ def run(args: argparse.Namespace) -> int:
     consumer = make_consumer(args.bootstrap, args.group, args.from_beginning)
     topics = list(ROUTES)
     consumer.subscribe(topics)
-    print(f"Bridge: {topics} -> Feast push (batch={args.batch_size}, "
+    print(f"Bridge: {topics} -> Feast push | kafka={kafka_conf.describe()} "
+          f"(batch={args.batch_size}, "
           f"{'service' if args.max_seconds == 0 else str(args.max_seconds) + 's'})")
 
     buf: dict[str, list[dict]] = {t: [] for t in topics}
@@ -157,7 +165,7 @@ def run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     """CLI cho bridge."""
     p = argparse.ArgumentParser(description="Kafka (Flink) -> Feast online store.")
-    p.add_argument("--bootstrap", default=os.environ.get("KAFKA_BOOTSTRAP", "redpanda:29092"))
+    p.add_argument("--bootstrap", default=kafka_conf.bootstrap())
     p.add_argument("--group", default="feast-feature-bridge")
     p.add_argument("--batch-size", type=int, default=200)
     p.add_argument("--max-seconds", type=int, default=60,

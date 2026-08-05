@@ -36,9 +36,14 @@
 -- (MERCHANT_RT_WINDOW_S=600, DEVICE_RT_WINDOW_S=3600, FLINK_WATERMARK_S=90).
 -- SQL không import Python được nên đây là chỗ DUY NHẤT lặp lại các con số đó.
 --
--- Chạy:
---   docker exec flink-jobmanager /opt/flink/bin/sql-client.sh \
---     -f /opt/flink/sql/realtime_features.sql
+-- File này là TEMPLATE: Flink SQL KHÔNG nội suy biến môi trường, nên
+-- ${KAFKA_BOOTSTRAP} và ${KAFKA_SQL_SECURITY} phải được thay TRƯỚC khi submit.
+-- Dùng script bọc sẵn (nó lo phần thay biến rồi gọi sql-client):
+--
+--   docker compose exec flink-jobmanager /opt/flink/sql/submit.sh
+--
+-- Local: KAFKA_SQL_SECURITY rỗng -> ra đúng file y như trước khi template hoá.
+-- GCP  : KAFKA_SECURITY_PROTOCOL=SASL_SSL -> script tự thêm các property SASL.
 -- =====================================================================
 
 SET 'execution.runtime-mode' = 'streaming';
@@ -84,7 +89,7 @@ CREATE TABLE transactions_src (
 ) WITH (
   'connector'                      = 'kafka',
   'topic'                          = 'transactions',
-  'properties.bootstrap.servers'   = 'redpanda:29092',
+${KAFKA_SQL_SECURITY}  'properties.bootstrap.servers'   = '${KAFKA_BOOTSTRAP}',
   'properties.group.id'            = 'flink-realtime-features',
   -- group-offsets: lần start mới tiếp tục từ offset đã commit thay vì nhảy tới
   -- cuối topic (latest-offset làm MẤT dữ liệu đến trong lúc job chết). Khi restore
@@ -110,7 +115,7 @@ CREATE TABLE merchant_rt_sink (
 ) WITH (
   'connector'                    = 'upsert-kafka',
   'topic'                        = 'merchant_rt_10min',
-  'properties.bootstrap.servers' = 'redpanda:29092',
+${KAFKA_SQL_SECURITY}  'properties.bootstrap.servers' = '${KAFKA_BOOTSTRAP}',
   'key.format'                   = 'json',
   'value.format'                 = 'json'
 );
@@ -125,7 +130,7 @@ CREATE TABLE device_rt_sink (
 ) WITH (
   'connector'                    = 'upsert-kafka',
   'topic'                        = 'device_rt_1h',
-  'properties.bootstrap.servers' = 'redpanda:29092',
+${KAFKA_SQL_SECURITY}  'properties.bootstrap.servers' = '${KAFKA_BOOTSTRAP}',
   'key.format'                   = 'json',
   'value.format'                 = 'json'
 );
