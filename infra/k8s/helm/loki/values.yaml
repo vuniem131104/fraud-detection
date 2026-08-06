@@ -1,0 +1,32 @@
+namespace: monitoring
+
+loki:
+  replicas: 1
+  image: grafana/loki:3.4.2
+  httpPort: 3100
+  grpcPort: 9096
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "250m"
+      memory: "512Mi"
+
+serviceAccount:
+  name: loki-sa
+  gcpServiceAccount: "loki-sa@project-57f7ef9a-6059-4068-ae7.iam.gserviceaccount.com"
+
+storage:
+  gcsBucket: fraud-detection-chunkss
+  rulerBucket: fraud-detection-rulerss
+
+config:
+  schemaFrom: "2024-04-01"
+  retentionPeriod: 168h # 7 days
+  alertmanagerUrl: "http://localhost:9093"
+
+service:
+  type: ClusterIP
+  httpPort: 3100
+  grpcPort: 9096

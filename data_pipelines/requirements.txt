@@ -1,0 +1,18 @@
+feast[redis,postgres]
+psycopg[binary,pool]
+uvicorn>=0.37.0
+apache-airflow-providers-fab
+confluent-kafka
+
+# --- Chỉ cần khi chạy trên GCP (docker-compose.gcp.yml) --------------------
+# providers-google : DataprocCreateBatchOperator (SPARK_RUNTIME=dataproc)
+# google-auth      : lấy access token cho SASL/OAUTHBEARER của Managed Kafka
+#
+# Cả hai vô hại ở local: DAG chỉ import provider bên trong hàm spark_task() khi
+# SPARK_RUNTIME=dataproc, còn google-auth chỉ được import khi
+# KAFKA_SASL_MECHANISM=OAUTHBEARER.
+#
+# GCS thì KHÔNG cần thư viện thêm: pyarrow 18 đã bundle GcsFileSystem, và nó đọc
+# credential qua ADC/metadata server bằng C++ chứ không qua google-auth.
+apache-airflow-providers-google
+google-auth

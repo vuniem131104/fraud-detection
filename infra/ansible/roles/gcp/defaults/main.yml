@@ -1,0 +1,10 @@
+---
+# Install the Google Cloud CLI on the VM (handy for gsutil/DVC + AR docker auth).
+gcp_install_cloud_cli: true
+gcp_apt_gpg_url: "https://packages.cloud.google.com/apt/doc/apt-key.gpg"
+gcp_apt_repo: "deb [signed-by=/etc/apt/keyrings/cloud.google.asc] https://packages.cloud.google.com/apt cloud-sdk main"
+
+# Configure docker to authenticate to Artifact Registry using the VM's attached
+# service account (Application Default Credentials from the metadata server).
+configure_artifact_registry_auth: true
+artifact_registry_host: "us-central1-docker.pkg.dev"

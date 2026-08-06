@@ -1,0 +1,16 @@
+Drift Detection API deployed successfully!
+
+Service: {{ .Values.api.name }}
+Namespace: {{ .Values.namespace }}
+Image: {{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}
+
+Internal URL (for Grafana):
+  http://{{ .Values.api.name }}.{{ .Values.namespace }}.svc.cluster.local/detect
+
+Endpoints:
+  GET /health  — liveness probe
+  GET /ready   — readiness probe (Postgres + baseline check)
+  GET /detect  — PSI drift result (JSON)
+
+Port-forward for local testing:
+  kubectl port-forward -n {{ .Values.namespace }} svc/{{ .Values.api.name }} 8001:80

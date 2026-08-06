@@ -1,0 +1,68 @@
+---
+- name: Create app directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+- name: Copy build-context files
+  ansible.builtin.copy:
+    src: "{{ airflow_src_dir }}/{{ item }}"
+    dest: "{{ app_dir }}/{{ item }}"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0644"
+  loop: "{{ airflow_copy_items }}"
+  notify: Restart airflow stack
+
+- name: Copy code / feature-store directories
+  ansible.builtin.copy:
+    src: "{{ airflow_src_dir }}/{{ item }}/"
+    dest: "{{ app_dir }}/{{ item }}/"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: preserve
+  loop: "{{ airflow_copy_dirs }}"
+  notify: Restart airflow stack
+
+- name: Ensure Airflow logs directory exists and is writable by the airflow uid
+  ansible.builtin.file:
+    path: "{{ app_dir }}/src/logs"
+    state: directory
+    owner: "{{ airflow_uid }}"
+    group: "0"
+    mode: "0775"
+
+- name: Render .env
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ app_dir }}/.env"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0600"
+  no_log: true
+  notify: Restart airflow stack
+
+- name: Deploy the compose stack (build + up -d)
+  community.docker.docker_compose_v2:
+    project_src: "{{ app_dir }}"
+    state: present
+    build: "{{ airflow_compose_build }}"
+    pull: missing
+    remove_orphans: true
+  become: true
+  become_user: "{{ ansible_user }}"
+  environment:
+    AIRFLOW_UID: "{{ airflow_uid }}"
+
+- name: Wait for the Airflow API server to become healthy
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:8090/health"
+    status_code: 200
+  register: airflow_health
+  retries: 30
+  delay: 10
+  until: airflow_health.status == 200
+  changed_when: false

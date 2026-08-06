@@ -1,0 +1,6 @@
+kubectl create namespace keda
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update
+helm install keda kedacore/keda \
+  --namespace keda \
+  --version 2.20.1

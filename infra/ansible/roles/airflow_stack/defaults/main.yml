@@ -1,0 +1,24 @@
+---
+app_dir: "/opt/airflow-stack"
+airflow_src_dir: "{{ playbook_dir }}/../../../airflow"
+
+# Build context items copied from the repo's airflow/ dir to the VM. Code dirs
+# (dags/etl/plugins) are bind-mounted by the compose file, so they must exist on
+# the host; the Dockerfile only bakes requirements.txt.
+airflow_copy_items:
+  - Dockerfile
+  - requirements.txt
+  - docker-compose.yml
+  - .dockerignore
+
+airflow_copy_dirs:
+  - src/dags
+  - src/etl
+  - src/plugins
+  - feature_store
+
+airflow_uid: 50000
+
+# docker compose build policy: 'policy' builds per the compose build config,
+# 'always' forces a rebuild each run.
+airflow_compose_build: policy

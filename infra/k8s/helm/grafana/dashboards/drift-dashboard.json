@@ -1,0 +1,318 @@
+{
+  "uid": "data-drift-monitoring",
+  "title": "Data Drift Monitoring",
+  "description": "Gọi drift-detection service (/detect) — Wasserstein distance trên amount_usd, cửa sổ 30 ngày vs training baseline",
+  "tags": [
+    "fraud-detection",
+    "drift"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 42,
+  "refresh": "5m",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Drift status",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "DriftAPI"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "true": {
+                  "text": "DRIFT DETECTED",
+                  "color": "red",
+                  "index": 0
+                },
+                "false": {
+                  "text": "NO DRIFT",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": [],
+          "fields": "/.*/"
+        },
+        "textMode": "value",
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "DriftAPI"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "http://drift-detection-api.core.svc.cluster.local/detect",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "drift_detected",
+              "text": "drift_detected",
+              "type": "string"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "gauge",
+      "title": "Wasserstein distance (log scale amount_usd)",
+      "description": "<0.1 no drift · 0.1–0.25 moderate · ≥0.25 significant",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "DriftAPI"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 0.5,
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "DriftAPI"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "http://drift-detection-api.core.svc.cluster.local/detect",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "wasserstein",
+              "text": "wasserstein",
+              "type": "number"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Samples in current window",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "DriftAPI"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": []
+        },
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "DriftAPI"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "http://drift-detection-api.core.svc.cluster.local/detect",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "n_current",
+              "text": "n_current",
+              "type": "number"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Baseline vs current — amount_usd",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "DriftAPI"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "custom": {
+            "align": "center"
+          }
+        },
+        "overrides": []
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "DriftAPI"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "http://drift-detection-api.core.svc.cluster.local/detect",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "baseline_mean",
+              "text": "baseline_mean",
+              "type": "number"
+            },
+            {
+              "selector": "current_mean",
+              "text": "current_mean",
+              "type": "number"
+            },
+            {
+              "selector": "baseline_std",
+              "text": "baseline_std",
+              "type": "number"
+            },
+            {
+              "selector": "current_std",
+              "text": "current_std",
+              "type": "number"
+            },
+            {
+              "selector": "n_current",
+              "text": "n_current",
+              "type": "number"
+            },
+            {
+              "selector": "threshold",
+              "text": "threshold",
+              "type": "number"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "editable": true
+}

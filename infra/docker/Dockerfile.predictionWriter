@@ -1,0 +1,14 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    "asyncpg>=0.31,<1" \
+    "aiokafka>=0.14.0" \
+    "structlog==25.5.0"
+
+COPY src/database ./src/database
+COPY src/workers/base_worker.py ./src/workers/base_worker.py
+COPY src/workers/postgres ./src/workers/postgres
+
+CMD ["sh", "-c", "exec env PYTHONPATH=src python3 src/workers/postgres/postgres_worker.py"]

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prediction-writer-configmap
+data:
+  KAFKA_MAX_RECORDS: "100"
+  KAFKA_TIMEOUT_MS: "1000"
+  PREDICTIONS_TOPIC: "predictions"
+  BOOTSTRAP_SERVERS: "fraud-detection-niemhoalongvu-8584.e.aivencloud.com:17550"
+  KAFKA_SECURITY_PROTOCOL: "SSL"
+  KAFKA_GROUP_ID: "prediction-writer"
+  KAFKA_SSL_CAFILE: "/app/certs/ca.pem"
+  KAFKA_SSL_CERTFILE: "/app/certs/service.cert"
+  KAFKA_SSL_KEYFILE: "/app/certs/service.key"
+  POSTGRES_PORT: "5432"
+  POSTGRES_HOST: "127.0.0.1"

@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.api.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.api.name }}
+spec:
+  replicas: {{ .Values.api.replicaCount }}
+  strategy:
+    type: {{ .Values.api.strategy.type }}
+    rollingUpdate:
+      {{- toYaml .Values.api.strategy.params | nindent 6 }}
+  selector:
+    matchLabels:
+      app: {{ .Values.api.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.api.name }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+      - name: {{ .Values.api.name }}
+        image: {{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}
+        imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+        ports:
+        - containerPort: {{ .Values.api.port }}
+          name: http
+        envFrom:
+        - configMapRef:
+            name: {{ .Values.api.name }}-configmap
+        - secretRef:
+            name: {{ .Values.api.name }}-secrets
+        volumeMounts:
+        - name: kafka-certs
+          mountPath: /app/certs
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.api.resources | nindent 10 }}
+      - name: cloud-sql-proxy
+        image: {{ .Values.cloudSqlProxy.image }}
+        args:
+          - "--structured-logs"
+          - "--auto-iam-authn"
+          - "--port={{ .Values.cloudSqlProxy.port }}"
+          - "$(CLOUD_SQL_INSTANCE)"
+        envFrom:
+        - secretRef:
+            name: {{ .Values.api.name }}-secrets
+        - configMapRef:
+            name: {{ .Values.api.name }}-configmap
+        resources:
+          {{- toYaml .Values.cloudSqlProxy.resources | nindent 10 }}
+      volumes:
+      - name: kafka-certs
+        secret:
+          secretName: kafka-certs
+          defaultMode: 0400

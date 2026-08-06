@@ -1,0 +1,15 @@
+---
+timezone: "Asia/Ho_Chi_Minh"
+
+common_base_packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - python3
+  - python3-pip
+  - acl          # required for become + unprivileged file ops (docker module)
+
+# Optional swap file (helps a small VM building the Airflow image).
+common_swap_enabled: true
+common_swap_size_mb: 2048

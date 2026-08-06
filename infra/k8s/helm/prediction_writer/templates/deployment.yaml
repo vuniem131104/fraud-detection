@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.predictionWriter.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.predictionWriter.name }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Values.predictionWriter.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.predictionWriter.name }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+      - name: {{ .Values.predictionWriter.name }}
+        image: {{ .Values.predictionWriter.image.repository }}:{{ .Values.predictionWriter.image.tag }}
+        imagePullPolicy: {{ .Values.predictionWriter.image.pullPolicy }}
+        envFrom:
+        - configMapRef:
+            name: {{ .Values.predictionWriter.name }}-configmap
+        - secretRef:
+            name: {{ .Values.predictionWriter.name }}-secrets
+        volumeMounts:
+        - name: kafka-certs
+          mountPath: /app/certs
+          readOnly: true
+        resources:
+          {{- toYaml .Values.predictionWriter.resources | nindent 10 }}
+      - name: cloud-sql-proxy
+        image: {{ .Values.cloudSqlProxy.image }}
+        args:
+          - "--structured-logs"
+          - "--auto-iam-authn"
+          - "--port={{ .Values.cloudSqlProxy.port }}"
+          - "$(CLOUD_SQL_INSTANCE)"
+        envFrom:
+        - secretRef:
+            name: {{ .Values.predictionWriter.name }}-secrets
+        - configMapRef:
+            name: {{ .Values.predictionWriter.name }}-configmap
+        resources:
+          {{- toYaml .Values.cloudSqlProxy.resources | nindent 10 }}
+      volumes:
+      - name: kafka-certs
+        secret:
+          secretName: kafka-certs
+          defaultMode: 0400  
+    

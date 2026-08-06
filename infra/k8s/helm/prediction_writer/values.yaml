@@ -1,0 +1,34 @@
+namespace: core
+
+predictionWriter:
+  name: prediction-writer
+  replicaCount: 1
+  image:
+    repository: us-central1-docker.pkg.dev/project-57f7ef9a-6059-4068-ae7/fraud-detection/prediction-writer
+    tag: "latest"
+    pullPolicy: Always
+  resources:
+    # KEDA scales this 0<->2 on Kafka lag; trim per-pod CPU/mem so a burst fits
+    # anywhere (incl. the 2-vCPU node).
+    requests:
+      cpu: "100m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+cloudSqlProxy:
+  image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.22.1
+  port: 5432
+  resources:
+    # cloud-sql-proxy sidecar — align with the other services' proxy (128m/128Mi).
+    requests:
+      cpu: "128m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+
+serviceAccount:
+  name: prediction-writer-sa
+  gcpServiceAccount: "prediction-writer-sa@project-57f7ef9a-6059-4068-ae7.iam.gserviceaccount.com"

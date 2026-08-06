@@ -1,0 +1,16 @@
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-kafka-prediction-writer
+  namespace: core
+spec:
+  secretTargetRef:
+  - parameter: ca
+    name: kafka-certs
+    key: ca.pem
+  - parameter: cert
+    name: kafka-certs
+    key: service.cert
+  - parameter: key
+    name: kafka-certs
+    key: service.key

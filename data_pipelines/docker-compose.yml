@@ -1,0 +1,544 @@
+# =====================================================================
+# Bước 0 — Hạ tầng local cho pipeline data
+# MinIO + Redpanda + Postgres (warehouse) + Cloud SQL Proxy + Spark + Flink + Airflow
+# (DataHub thêm sau — chỉ cần nối vào network "dataeng" là chạy được)
+#
+#   make up      # dựng hết
+#   make ps      # xem trạng thái
+#   make down    # tắt (giữ dữ liệu)
+#   make clean   # tắt + xoá sạch volume
+#
+# Tag image đặt thẳng trong file này. Mật khẩu / secret nằm trong .env
+# =====================================================================
+
+name: dataeng-local
+
+# --- Cấu hình dùng chung cho các service Airflow (YAML anchor) --------
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: fraud-detection/airflow:3.2.2
+  env_file:
+    - .env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?set AIRFLOW_JWT_SECRET in .env}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "600"
+    AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: "600"
+    TZ: Asia/Ho_Chi_Minh
+    # shared + feature_store PHẢI nằm trên PYTHONPATH. udf của ODFV bị dill pickle
+    # vào registry THEO THAM CHIẾU tới module (feature_views, feature_windows), nên
+    # mọi client mở registry (materialize, get_online_features) đều unpickle nó
+    # TRƯỚC khi parse repo -> ModuleNotFoundError nếu chỉ dựa vào sys.path.insert
+    # trong feature_views.py hoặc vào cwd tình cờ là /opt/airflow/feature_store.
+    PYTHONPATH: /opt/airflow/code:/opt/airflow/shared:/opt/airflow/feature_store
+    # Độ dài cửa sổ + danh sách view được materialize (module không phụ thuộc gì).
+    # DAG và Feast repo đều đọc từ đây -> không hardcode hai nơi.
+    SHARED_DIR: /opt/airflow/shared
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/include:/opt/airflow/code/include
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./shared:/opt/airflow/shared:ro               # feature_windows.py
+    - ../feature_store:/opt/airflow/feature_store   # Feast repo (apply/materialize)
+    # generator chạy trong DAG: giữ nguyên cấu trúc repo để import được
+    - ../scripts/initial:/opt/airflow/repo/scripts/initial
+    - ./generator:/opt/airflow/repo/data_pipelines/generator
+    - ./.env:/opt/airflow/repo/data_pipelines/.env:ro
+    - /var/run/docker.sock:/var/run/docker.sock   # để DAG trigger Spark qua `docker exec`
+  user: "${AIRFLOW_UID:-50000}:0"
+  group_add:
+    - "984"   # gid group 'docker' trên host -> quyền dùng docker.sock
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+  networks: [dataeng]
+
+services:
+  # ===================================================================
+  # MinIO — kho file (S3-compatible)
+  #   API      : http://localhost:9000
+  #   Console  : http://localhost:9001   (login = MINIO_ROOT_USER/PASSWORD)
+  # ===================================================================
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    networks: [dataeng]
+    restart: unless-stopped
+
+  # Chạy 1 lần: tạo sẵn bucket rồi tự thoát ------------------------------
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-03-12T17-29-24Z
+    container_name: minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until /usr/bin/mc alias set local http://minio:9000 '${MINIO_ROOT_USER}' '${MINIO_ROOT_PASSWORD}'; do
+        echo '...cho MinIO khởi động'; sleep 2;
+      done;
+      /usr/bin/mc mb --ignore-existing local/raw;
+      /usr/bin/mc mb --ignore-existing local/staging;
+      /usr/bin/mc mb --ignore-existing local/curated;
+      /usr/bin/mc mb --ignore-existing local/source;
+      echo '=> Buckets hiện có:'; /usr/bin/mc ls local;
+      exit 0;
+      "
+    networks: [dataeng]
+
+  # ===================================================================
+  # Postgres — single instance (Airflow metadata + Warehouse)
+  #   host: localhost:5432
+  #   DBs: airflow (default), warehouse (created by init script)
+  # ===================================================================
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${AIRFLOW_USER}
+      POSTGRES_PASSWORD: ${AIRFLOW_PASSWORD}
+      POSTGRES_DB: ${AIRFLOW_DB}
+      TZ: Asia/Ho_Chi_Minh
+      PGTZ: Asia/Ho_Chi_Minh
+    command: ["postgres", "-c", "timezone=Asia/Ho_Chi_Minh"]
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_USER} -d ${AIRFLOW_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [dataeng]
+    restart: unless-stopped
+
+  postgres-init:
+    image: postgres:16
+    container_name: postgres-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${AIRFLOW_PASSWORD}
+    volumes:
+      - ./sql:/sql:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        for db in "${WAREHOUSE_POSTGRES_DB}" "${OPS_POSTGRES_DB}" "${FEAST_REGISTRY_DB}"; do
+          if psql -h postgres -U "${AIRFLOW_USER}" -d "${AIRFLOW_DB}" -tAc "SELECT 1 FROM pg_database WHERE datname = '$$db'" | grep -q 1; then
+            echo "   $$db: đã có"
+          else
+            psql -h postgres -U "${AIRFLOW_USER}" -d "${AIRFLOW_DB}" -c "CREATE DATABASE \"$$db\""
+          fi
+        done
+        psql -h postgres -U "${AIRFLOW_USER}" -d "${WAREHOUSE_POSTGRES_DB}" -c 'CREATE SCHEMA IF NOT EXISTS application'
+        for f in /sql/ops/*.sql; do
+          echo "   apply $$f -> ${OPS_POSTGRES_DB}"
+          psql -h postgres -U "${AIRFLOW_USER}" -d "${OPS_POSTGRES_DB}" -v ON_ERROR_STOP=1 -f "$$f"
+        done
+        for f in /sql/warehouse/*.sql; do
+          echo "   apply $$f -> ${WAREHOUSE_POSTGRES_DB}"
+          psql -h postgres -U "${AIRFLOW_USER}" -d "${WAREHOUSE_POSTGRES_DB}" -v ON_ERROR_STOP=1 -f "$$f"
+        done
+        echo "=> Init done: airflow + ${WAREHOUSE_POSTGRES_DB} + ${OPS_POSTGRES_DB} + ${FEAST_REGISTRY_DB}"
+    networks: [dataeng]
+
+  # ===================================================================
+  # Redis — ONLINE feature store của Feast
+  #   Từ container khác -> redis:6379 | từ host -> localhost:6380
+  # ===================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6380:6379"   # 6379 host đã bị container khác chiếm
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [dataeng]
+    restart: unless-stopped
+
+  # ===================================================================
+  # Redpanda — streaming tương thích Kafka (thay cho Kafka)
+  #   Từ container khác  -> redpanda:29092
+  #   Từ máy host        -> localhost:9092
+  #   Schema Registry (nội bộ) -> redpanda:8081
+  # ===================================================================
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.1.9
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --smp
+      - "1"
+      - --overprovisioned
+      - --node-id
+      - "0"
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --pandaproxy-addr
+      - 0.0.0.0:8082
+      - --advertise-pandaproxy-addr
+      - localhost:8082
+    ports:
+      - "9092:9092"   # Kafka API cho client trên host
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info -X brokers=127.0.0.1:29092 >/dev/null && curl -fsS --max-time 5 http://127.0.0.1:8081/subjects >/dev/null"]
+      interval: 10s
+      timeout: 6s
+      retries: 10
+    networks: [dataeng]
+    restart: unless-stopped
+
+  # Chạy 1 lần: tạo sẵn topic rồi tự thoát -------------------------------
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.1.9
+    container_name: redpanda-init
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        B=redpanda:29092
+        # transactions: 3 partition để demo được lỗi "idle partition" giữ watermark
+        rpk topic create transactions -p 3 -X brokers=$$B || true
+        # Sink upsert-kafka của Flink -> phải nén theo key: cleanup.policy=compact
+        # để mỗi entity chỉ giữ bản mới nhất (đúng ngữ nghĩa "giá trị hiện tại").
+        rpk topic create merchant_rt_10min -p 1 -c cleanup.policy=compact -X brokers=$$B || true
+        rpk topic create device_rt_1h      -p 1 -c cleanup.policy=compact -X brokers=$$B || true
+        echo '=> Topics:'; rpk topic list -X brokers=$$B
+    networks: [dataeng]
+
+  # Redpanda Console — http://localhost:8085 (thay cho Kafka UI) --------
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.8.13
+    container_name: redpanda-console
+    restart: on-failure
+    entrypoint: /bin/sh
+    command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml; /app/console"
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda:29092"]
+          schemaRegistry:
+            enabled: true
+            urls: ["http://redpanda:8081"]
+    ports:
+      - "8085:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks: [dataeng]
+
+
+
+  # ===================================================================
+  # Streaming services — chạy LIÊN TỤC (không do Airflow điều phối)
+  #
+  #   stream-generator : sinh giao dịch live -> Kafka `transactions`
+  #   ops-ingest       : Kafka -> opsdb.ops.transactions        (TEAM DATA)
+  #   feature-bridge   : Kafka (Flink) -> Redis qua Feast push  (TEAM ML)
+  #
+  # Ba service này là phần "hệ thống đang chạy". Airflow chỉ lo phần batch hằng
+  # ngày. Cả ba dùng chung image airflow vì đã có feast + confluent-kafka + psycopg.
+  # ===================================================================
+
+  # Bộ mô phỏng hệ thống thật: lập kế hoạch trọn ngày rồi phát đúng lịch, nên
+  # burst của card_testing (12-45 giao dịch trong vài phút) được giữ nguyên cấu
+  # trúc thời gian. Nhịp tự suy từ generator_config.yaml để KHỚP nhịp lịch sử.
+  stream-generator:
+    image: fraud-detection/airflow:3.2.2
+    container_name: stream-generator
+    env_file: [.env]
+    working_dir: /opt/airflow/repo/data_pipelines/generator
+    environment:
+      PG_HOST: postgres
+      PYTHONUNBUFFERED: "1"
+      TZ: Asia/Ho_Chi_Minh
+    entrypoint:
+      - python
+      - generate_stream.py
+      - --bootstrap
+      - redpanda:29092
+    volumes:
+      - ./generator:/opt/airflow/repo/data_pipelines/generator
+      - ../scripts/initial:/opt/airflow/repo/scripts/initial
+      - ./.env:/opt/airflow/repo/data_pipelines/.env:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      redpanda: {condition: service_healthy}
+    networks: [dataeng]
+    restart: unless-stopped
+
+  ops-ingest:
+    image: fraud-detection/airflow:3.2.2
+    container_name: ops-ingest
+    env_file: [.env]
+    working_dir: /opt/airflow/code
+    environment:
+      PYTHONPATH: /opt/airflow/code
+      PYTHONUNBUFFERED: "1"
+      TZ: Asia/Ho_Chi_Minh
+    entrypoint: ["python", "-m", "include.kafka_to_ops", "--max-seconds", "0"]
+    volumes:
+      - ./airflow/include:/opt/airflow/code/include
+    depends_on:
+      postgres: {condition: service_healthy}
+      redpanda: {condition: service_healthy}
+    networks: [dataeng]
+    restart: unless-stopped
+
+  # Flink chỉ ghi được ra Kafka; Feast không có Kafka sink. Bridge đọc hai topic
+  # kết quả rồi store.push() -> giá trị vào Redis NGAY khi Flink tính xong, không
+  # chờ nhịp batch. Để Feast là người ghi duy nhất thì khoá Redis luôn đúng format.
+  feature-bridge:
+    image: fraud-detection/airflow:3.2.2
+    container_name: feature-bridge
+    env_file: [.env]
+    working_dir: /opt/airflow/code
+    environment:
+      # Bridge mở registry Feast -> phải unpickle udf của ODFV, vốn tham chiếu tới
+      # module feature_views/feature_windows. Xem ghi chú ở airflow-common-env.
+      PYTHONPATH: /opt/airflow/code:/opt/airflow/shared:/opt/airflow/feature_store
+      PYTHONUNBUFFERED: "1"
+      FEAST_REPO_PATH: /opt/airflow/feature_store
+      SHARED_DIR: /opt/airflow/shared
+      TZ: Asia/Ho_Chi_Minh
+    entrypoint: ["python", "-m", "include.feature_bridge", "--max-seconds", "0"]
+    volumes:
+      - ./airflow/include:/opt/airflow/code/include
+      - ./shared:/opt/airflow/shared:ro
+      - ../feature_store:/opt/airflow/feature_store
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      redpanda: {condition: service_healthy}
+    networks: [dataeng]
+    restart: unless-stopped
+
+  # ===================================================================
+  # Spark — standalone cluster (1 master + 1 worker)
+  #   Master UI : http://localhost:8080
+  #   Worker UI : http://localhost:8083
+  #   App UI    : http://localhost:4040 (khi có job chạy)
+  #   Kết nối job: spark://spark-master:7077
+  # ===================================================================
+  spark-master:
+    image: apache/spark:3.5.3
+    container_name: spark-master
+    hostname: spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    ports:
+      - "8080:8080"   # Master web UI
+      - "7077:7077"   # Master RPC (submit job vào đây)
+      - "4040:4040"   # Application UI
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_LOCAL_HOSTNAME: spark-master   # tránh reverse-lookup container-id fail
+    volumes:
+      - ./spark/jobs:/opt/spark/jobs       # PySpark jobs (DP2/DP3)
+      - ./shared:/opt/spark/shared:ro      # feature_windows.py (độ dài cửa sổ)
+    networks: [dataeng]
+    restart: unless-stopped
+
+  spark-worker:
+    image: apache/spark:3.5.3
+    container_name: spark-worker
+    hostname: spark-worker
+    depends_on:
+      - spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    ports:
+      - "8083:8081"   # Worker web UI (host 8081 bị process khác chiếm -> map ra 8083)
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: "2g"
+      SPARK_LOCAL_HOSTNAME: spark-worker   # tránh reverse-lookup container-id fail
+    volumes:
+      - ./spark/jobs:/opt/spark/jobs       # PySpark jobs (DP2/DP3)
+      - ./shared:/opt/spark/shared:ro      # feature_windows.py (độ dài cửa sổ)
+    networks: [dataeng]
+    restart: unless-stopped
+
+  # ===================================================================
+  # Flink — session cluster (1 jobmanager + 1 taskmanager)
+  #   Dashboard: http://localhost:8082
+  # ===================================================================
+  # Chạy 1 lần: volume checkpoint do root tạo, nhưng JVM Flink chạy bằng user
+  # flink (uid 9999) -> phải chown, không thì job fail ngay khi bật checkpointing
+  # ("Failed to create directory for shared state").
+  flink-init:
+    image: flink:1.20.0
+    container_name: flink-init
+    user: root
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /opt/flink/checkpoints
+        chown -R 9999:9999 /opt/flink/checkpoints
+        echo "=> checkpoint dir ready (uid 9999)"
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+    networks: [dataeng]
+
+  flink-jobmanager:
+    image: flink:1.20.0
+    container_name: flink-jobmanager
+    command: jobmanager
+    depends_on:
+      flink-init:
+        condition: service_completed_successfully
+    ports:
+      - "8082:8081"   # Flink dashboard (đổi khỏi 8081 vì trùng Spark worker)
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        state.backend: hashmap
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        state.checkpoints.num-retained: 3
+    volumes:
+      - ./flink/lib/flink-sql-connector-kafka-3.3.0-1.20.jar:/opt/flink/lib/flink-sql-connector-kafka-3.3.0-1.20.jar
+      - ./flink/sql:/opt/flink/sql          # Flink SQL jobs
+      - flink-checkpoints:/opt/flink/checkpoints   # state phải sống qua restart
+    networks: [dataeng]
+    restart: unless-stopped
+
+  flink-taskmanager:
+    image: flink:1.20.0
+    container_name: flink-taskmanager
+    depends_on:
+      - flink-jobmanager
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        state.backend: hashmap
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        state.checkpoints.num-retained: 3
+        taskmanager.numberOfTaskSlots: 2
+    volumes:
+      - ./flink/lib/flink-sql-connector-kafka-3.3.0-1.20.jar:/opt/flink/lib/flink-sql-connector-kafka-3.3.0-1.20.jar
+      - ./flink/sql:/opt/flink/sql          # Flink SQL jobs
+      - flink-checkpoints:/opt/flink/checkpoints   # state phải sống qua restart
+    networks: [dataeng]
+    restart: unless-stopped
+
+  # ===================================================================
+  # Airflow 3.x — orchestration (LocalExecutor, metadata trên Cloud SQL)
+  #   Web UI (api-server): http://localhost:8090
+  # ===================================================================
+
+  # Chạy 1 lần: migrate DB + tạo user admin, rồi thoát -----------------
+  airflow-init:
+    <<: *airflow-common
+    command:
+      - bash
+      - -c
+      - |
+        airflow db migrate
+        airflow fab-db migrate
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USER:-airflow}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD:-airflow}" \
+          --firstname Admin --lastname User --role Admin \
+          --email admin@example.com || true
+    restart: on-failure
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8090:8080"
+    healthcheck:
+      # Airflow 3 chuyển health sang /api/v2/monitor/health; /health trả 404 nên
+      # container luôn "unhealthy" dù UI hoạt động bình thường.
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD", "airflow", "jobs", "check", "--job-type", "DagProcessorJob", "--local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      # Cổng 8974 chỉ mở khi bật AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK. Hỏi trực
+      # tiếp metadata DB thay vì mở thêm một HTTP endpoint nữa.
+      test: ["CMD", "airflow", "jobs", "check", "--job-type", "SchedulerJob", "--local"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+networks:
+  dataeng:
+    name: dataeng
+    driver: bridge
+
+volumes:
+  flink-checkpoints:
+  redis-data:
+  minio-data:
+  redpanda-data:
+  pgdata:

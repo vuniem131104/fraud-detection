@@ -1,0 +1,11 @@
+# Fraud Detection API Helm Chart
+
+1. Get status with: `helm status fraud-detection-api`
+2. View values with: `helm get values fraud-detection-api`
+3. View manifests with: `helm get manifest fraud-detection-api`
+
+To upgrade:
+  helm upgrade --install fraud-detection-api ./infra/k8s/helm/fraud_detection
+
+To delete:
+  helm uninstall fraud-detection-api

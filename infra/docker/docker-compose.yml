@@ -1,0 +1,55 @@
+services:
+  mlflow-postgres:
+    image: postgres:16
+    container_name: mlflow-postgres
+    environment:
+      POSTGRES_USER: ${MLFLOW_DB_USER}
+      POSTGRES_PASSWORD: ${MLFLOW_DB_PASSWORD}
+      POSTGRES_DB: ${MLFLOW_DB}
+      TZ: Asia/Ho_Chi_Minh
+      PGTZ: Asia/Ho_Chi_Minh
+    command: ["postgres", "-c", "timezone=Asia/Ho_Chi_Minh"]
+    ports:
+      - "5433:5432"   
+    volumes:
+      - mlflow-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    image: fraud-detection/mlflow:3.12.0
+    container_name: mlflow
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+    command:
+      - mlflow
+      - server
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "5000"
+      # trong docker network dùng tên service; DB nằm ở cổng 5432 BÊN TRONG container
+      - --backend-store-uri
+      - postgresql+psycopg2://${MLFLOW_DB_USER}:${MLFLOW_DB_PASSWORD}@mlflow-postgres:5432/${MLFLOW_DB}
+      - --artifacts-destination
+      - /mlflow/artifacts
+      - --serve-artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-artifacts:/mlflow/artifacts
+    depends_on:
+      mlflow-postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mlflow-pgdata:     
+  mlflow-artifacts:   

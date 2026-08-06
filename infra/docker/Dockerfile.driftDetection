@@ -1,0 +1,25 @@
+FROM python:3.13-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app/src \
+    TZ=Asia/Ho_Chi_Minh
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    "asyncpg>=0.31,<1" \
+    "fastapi==0.125.0" \
+    "numpy==2.4.5" \
+    "pandas==2.3.3" \
+    "pyarrow>=15" \
+    "structlog==25.5.0" \
+    "uvicorn==0.34.0"
+
+COPY src/database ./src/database
+COPY src/drift_detection ./src/drift_detection
+COPY dataset/training_data.parquet ./dataset/training_data.parquet
+
+EXPOSE 8001
+
+CMD ["sh", "-c", "uvicorn drift_detection.main:app --host 0.0.0.0 --port 8001 --workers ${DRIFT_DETECTION_API_WORKERS:-1}"]
