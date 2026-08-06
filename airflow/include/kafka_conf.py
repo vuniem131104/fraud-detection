@@ -19,6 +19,9 @@ Biến môi trường:
 
 from __future__ import annotations
 
+import base64
+import json
+import time
 import os
 from datetime import timezone
 
@@ -59,13 +62,47 @@ def _principal(creds) -> str:
     return _metadata("instance/service-accounts/default/email")
 
 
+# Managed Kafka KHÔNG nhận access token thô. Nó đòi một JWT gói quanh token, đúng
+# như GcpLoginCallbackHandler của Google dựng (đã dịch ngược từ
+# managed-kafka-auth-login-handler-1.0.6):
+#
+#   b64url({"typ":"JWT","alg":"GOOG_OAUTH2_TOKEN"})
+#   + "." + b64url({"exp":<hết hạn>,"iat":<bây giờ>,"scope":"kafka","sub":<email SA>})
+#   + "." + b64url(<access token>)
+#
+# base64url KHÔNG padding, ba phần nối bằng dấu chấm. Gửi access token thô sẽ bị
+# broker trả "invalid credentials with SASL mechanism OAUTHBEARER" — thông báo
+# không hề gợi ý rằng vấn đề là ĐỊNH DẠNG chứ không phải quyền.
+_JWT_HEADER = {"typ": "JWT", "alg": "GOOG_OAUTH2_TOKEN"}
+
+
+def _b64(raw: str) -> str:
+    """base64url không padding — giống Base64.getUrlEncoder().withoutPadding()."""
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _kafka_access_token(token: str, exp_epoch: int, subject: str) -> str:
+    """Gói access token thành JWT mà Managed Kafka chấp nhận.
+
+    ``scope`` là chuỗi cố định ``"kafka"`` (không phải scope OAuth dùng để LẤY
+    token — cái đó là cloud-platform).
+    """
+    claims = {"exp": int(exp_epoch), "iat": int(time.time()),
+              "scope": "kafka", "sub": subject}
+    return ".".join([
+        _b64(json.dumps(_JWT_HEADER, separators=(",", ":"))),
+        _b64(json.dumps(claims, separators=(",", ":"))),
+        _b64(token),
+    ])
+
+
 def _oauth_token_cb(_config: str):
     """Trả 4-tuple ``(token, expiry_epoch_giây, principal, extensions)``.
 
-    ĐÚNG SỐ PHẦN TỬ LÀ BẮT BUỘC: hợp đồng ``oauth_cb`` của confluent-kafka là
-    4-tuple. Trả 2-tuple ``(token, expiry)`` thì broker từ chối với
-    "Authentication failed ... invalid credentials with SASL mechanism OAUTHBEARER"
-    — lỗi không nói gì về hình dạng tuple nên rất dễ đi tìm sai chỗ.
+    Hai chỗ dễ sai, cả hai đều báo cùng một lỗi "invalid credentials":
+      1. Số phần tử: hợp đồng ``oauth_cb`` là 4-tuple, không phải 2.
+      2. Định dạng token: phải là JWT bọc quanh access token (xem
+         ``_kafka_access_token``), không phải access token thô.
 
     Dùng ADC: trên VM GCP đó là service account gắn kèm, không cần key file.
     SA cần role ``roles/managedkafka.client``.
@@ -82,7 +119,10 @@ def _oauth_token_cb(_config: str):
     expiry = creds.expiry
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
-    return creds.token, expiry.timestamp(), _principal(creds), {}
+    exp = expiry.timestamp()
+
+    principal = _principal(creds)
+    return _kafka_access_token(creds.token, exp, principal), exp, principal, {}
 
 
 def client_config(**extra) -> dict:
