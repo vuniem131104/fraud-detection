@@ -1,0 +1,16 @@
+# Secret: password Cloud SQL, Private IP, bootstrap Managed Kafka.
+# Commit file này là lộ toàn bộ credential của stack.
+.env
+
+# Python
+__pycache__/
+*.py[oc]
+*.egg-info
+
+# Log Airflow sinh ra lúc chạy
+airflow/logs/
+
+# CỐ Ý KHÔNG ignore flink/lib/*.jar: compose bind-mount hai jar đó theo đường dẫn
+# cố định, và bind-mount trỏ vào file không tồn tại sẽ bị docker tạo thành THƯ MỤC
+# rỗng — Flink khởi động bình thường rồi chết lúc kết nối Kafka. Commit 14 MB jar
+# đổi lấy việc `git clone && docker compose up -d` chạy được ngay là đáng.
