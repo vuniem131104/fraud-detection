@@ -91,13 +91,16 @@ services:
     command:
       - "--address=0.0.0.0"
       - "--port=5432"
-      - "${CLOUDSQL_CONNECTION_NAME:?set CLOUDSQL_CONNECTION_NAME in .env.gcp}"
+      - "--health-check"
+      - "--http-address=0.0.0.0"
+      - "--http-port=9090"
+      - "${CLOUDSQL_CONNECTION_NAME}"
     healthcheck:
-      # Proxy không có endpoint health; kiểm cổng đã mở là đủ cho depends_on.
-      test: ["CMD-SHELL", "/cloud-sql-proxy --version >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:9090/readiness >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 6
+      start_period: 20s
     networks: [dataeng]
     restart: unless-stopped
 
