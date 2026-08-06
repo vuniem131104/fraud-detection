@@ -14,11 +14,13 @@ Biến môi trường:
     KAFKA_SASL_MECHANISM   OAUTHBEARER (mặc định) | PLAIN | SCRAM-SHA-512
     KAFKA_SASL_USERNAME / KAFKA_SASL_PASSWORD   chỉ cho PLAIN / SCRAM
     KAFKA_SSL_CAFILE    CA tuỳ chọn (mặc định dùng CA hệ thống)
+    GOOGLE_MANAGED_KAFKA_AUTH_PRINCIPAL   ghi đè principal (mặc định: email SA)
 """
 
 from __future__ import annotations
 
 import os
+from datetime import timezone
 
 # Scope duy nhất Managed Kafka nhận.
 _GCP_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
@@ -32,19 +34,55 @@ def bootstrap() -> str:
     return b
 
 
-def _oauth_token_cb(_config: str):
-    """Trả ``(token, thời_điểm_hết_hạn)`` cho SASL/OAUTHBEARER.
+def _metadata(path: str) -> str:
+    """Đọc một trường từ metadata server của GCE."""
+    import urllib.request
 
-    Dùng Application Default Credentials: trên VM GCP đó là service account gắn
-    kèm, không cần key file. SA cần role ``roles/managedkafka.client``.
+    req = urllib.request.Request(
+        "http://metadata.google.internal/computeMetadata/v1/" + path,
+        headers={"Metadata-Flavor": "Google"})
+    return urllib.request.urlopen(req, timeout=5).read().decode().strip()
+
+
+def _principal(creds) -> str:
+    """Email của service account — SASL principal mà Managed Kafka đòi.
+
+    librdkafka bắt buộc principal khác rỗng. Trên GCE, ``google.auth.default()``
+    trả về ComputeEngineCredentials với ``service_account_email`` là "default"
+    cho tới khi refresh, nên phải hỏi metadata server.
+    """
+    if p := os.environ.get("GOOGLE_MANAGED_KAFKA_AUTH_PRINCIPAL"):
+        return p
+    email = getattr(creds, "service_account_email", None)
+    if email and email != "default":
+        return email
+    return _metadata("instance/service-accounts/default/email")
+
+
+def _oauth_token_cb(_config: str):
+    """Trả 4-tuple ``(token, expiry_epoch_giây, principal, extensions)``.
+
+    ĐÚNG SỐ PHẦN TỬ LÀ BẮT BUỘC: hợp đồng ``oauth_cb`` của confluent-kafka là
+    4-tuple. Trả 2-tuple ``(token, expiry)`` thì broker từ chối với
+    "Authentication failed ... invalid credentials with SASL mechanism OAUTHBEARER"
+    — lỗi không nói gì về hình dạng tuple nên rất dễ đi tìm sai chỗ.
+
+    Dùng ADC: trên VM GCP đó là service account gắn kèm, không cần key file.
+    SA cần role ``roles/managedkafka.client``.
     """
     import google.auth
     import google.auth.transport.requests
 
     creds, _ = google.auth.default(scopes=[_GCP_SCOPE])
     creds.refresh(google.auth.transport.requests.Request())
-    # librdkafka cần expiry dạng epoch giây.
-    return creds.token, creds.expiry.timestamp()
+
+    # creds.expiry là datetime NAIVE biểu diễn UTC. Gọi .timestamp() trực tiếp sẽ
+    # được hiểu là giờ ĐỊA PHƯƠNG — container chạy TZ=Asia/Ho_Chi_Minh nên token
+    # trông như đã hết hạn 7 tiếng trước và librdkafka loại nó.
+    expiry = creds.expiry
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return creds.token, expiry.timestamp(), _principal(creds), {}
 
 
 def client_config(**extra) -> dict:

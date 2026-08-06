@@ -211,8 +211,11 @@ def check_kafka() -> None:
         except KafkaException as e:
             raise CheckFailed(
                 f"không lấy được metadata: {e}",
-                "SA có roles/managedkafka.client chưa? VM có scope cloud-platform "
-                "chưa? (thiếu scope thì IAM đúng vẫn bị chặn)",
+                "Nếu log có 'invalid credentials with SASL mechanism OAUTHBEARER' "
+                "thì vấn đề là TOKEN, không phải mạng: oauth_cb phải trả 4-tuple "
+                "(token, expiry_epoch_giây, principal, extensions) — principal là "
+                "email SA và không được rỗng. Nếu không có dòng đó: SA có "
+                "roles/managedkafka.client chưa? VM có scope cloud-platform chưa?",
             ) from e
 
         print(f"{INFO}broker: {len(md.brokers)}  topic: {len(md.topics)}")

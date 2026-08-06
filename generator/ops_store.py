@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import random
+from datetime import timezone
 import sys
 from pathlib import Path
 
@@ -244,14 +245,55 @@ def apply_dim_churn(cfg: dict, rng: random.Random) -> dict[str, int]:
 _GCP_KAFKA_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
 
+def _metadata(path: str) -> str:
+    """Đọc một trường từ metadata server của GCE."""
+    import urllib.request
+
+    req = urllib.request.Request(
+        "http://metadata.google.internal/computeMetadata/v1/" + path,
+        headers={"Metadata-Flavor": "Google"})
+    return urllib.request.urlopen(req, timeout=5).read().decode().strip()
+
+
+def _principal(creds) -> str:
+    """Email của service account — SASL principal mà Managed Kafka đòi.
+
+    librdkafka bắt buộc principal khác rỗng. Trên GCE, ``google.auth.default()``
+    trả về ComputeEngineCredentials với ``service_account_email`` là "default"
+    cho tới khi refresh, nên phải hỏi metadata server.
+    """
+    if p := os.environ.get("GOOGLE_MANAGED_KAFKA_AUTH_PRINCIPAL"):
+        return p
+    email = getattr(creds, "service_account_email", None)
+    if email and email != "default":
+        return email
+    return _metadata("instance/service-accounts/default/email")
+
+
 def _oauth_token_cb(_config: str):
-    """Access token cho SASL/OAUTHBEARER của Managed Kafka (ADC trên VM GCP)."""
+    """Trả 4-tuple ``(token, expiry_epoch_giây, principal, extensions)``.
+
+    ĐÚNG SỐ PHẦN TỬ LÀ BẮT BUỘC: hợp đồng ``oauth_cb`` của confluent-kafka là
+    4-tuple. Trả 2-tuple ``(token, expiry)`` thì broker từ chối với
+    "Authentication failed ... invalid credentials with SASL mechanism OAUTHBEARER"
+    — lỗi không nói gì về hình dạng tuple nên rất dễ đi tìm sai chỗ.
+
+    Dùng ADC: trên VM GCP đó là service account gắn kèm, không cần key file.
+    SA cần role ``roles/managedkafka.client``.
+    """
     import google.auth
     import google.auth.transport.requests
 
     creds, _ = google.auth.default(scopes=[_GCP_KAFKA_SCOPE])
     creds.refresh(google.auth.transport.requests.Request())
-    return creds.token, creds.expiry.timestamp()
+
+    # creds.expiry là datetime NAIVE biểu diễn UTC. Gọi .timestamp() trực tiếp sẽ
+    # được hiểu là giờ ĐỊA PHƯƠNG — container chạy TZ=Asia/Ho_Chi_Minh nên token
+    # trông như đã hết hạn 7 tiếng trước và librdkafka loại nó.
+    expiry = creds.expiry
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return creds.token, expiry.timestamp(), _principal(creds), {}
 
 
 def kafka_client_config(**extra) -> dict:
