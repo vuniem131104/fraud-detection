@@ -37,15 +37,12 @@ stream (shared device/email = repeated values; velocity = derivable).
 
 Usage::
 
-    uv run python scripts/initial/generate_fake_data.py                 # full 300k
     uv run python scripts/initial/generate_fake_data.py --transactions 4000 \
         --users 800 --merchants 120 --devices 700                       # smoke test
 """
 
 from __future__ import annotations
 
-import argparse
-import asyncio
 import math
 import os
 import random
@@ -55,7 +52,6 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
-import asyncpg
 import numpy as np
 
 HCM_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
@@ -64,110 +60,6 @@ HCM_TZ = timezone(timedelta(hours=7), "Asia/Ho_Chi_Minh")
 # Schema (exactly the requested six-table contract, schema-qualified)         #
 # --------------------------------------------------------------------------- #
 
-DDL = """
-CREATE SCHEMA IF NOT EXISTS application;
-
-DROP TABLE IF EXISTS application.labels CASCADE;
-DROP TABLE IF EXISTS application.transactions CASCADE;
-DROP TABLE IF EXISTS application.cards CASCADE;
-DROP TABLE IF EXISTS application.devices CASCADE;
-DROP TABLE IF EXISTS application.merchants CASCADE;
-DROP TABLE IF EXISTS application.users CASCADE;
-
--- Users: customer profile information.
-CREATE TABLE application.users (
-    id                  TEXT PRIMARY KEY,
-    email               TEXT NOT NULL UNIQUE,
-    country_code        VARCHAR(2) NOT NULL,
-    customer_segment    TEXT NOT NULL,          -- normal, premium, vip
-    kyc_level           SMALLINT NOT NULL,      -- 0,1,2
-    email_verified      BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT users_id_check CHECK (id ~ '^[0-9a-f]{32}$')
-);
-
--- Cards: payment cards owned by users.
-CREATE TABLE application.cards (
-    id                  TEXT PRIMARY KEY,
-    user_id             TEXT NOT NULL,
-    issuer_code         TEXT NOT NULL,
-    country_code        VARCHAR(2) NOT NULL,
-    brand               TEXT NOT NULL,          -- Visa, Mastercard, Amex
-    type                TEXT NOT NULL,          -- debit, credit
-    bin_code            VARCHAR(8) NOT NULL,
-    is_virtual          BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT cards_user_fk FOREIGN KEY (user_id) REFERENCES application.users(id),
-    CONSTRAINT cards_id_check CHECK (id ~ '^[0-9a-f]{32}$')
-);
-
--- Merchants: merchant information for category/risk features.
-CREATE TABLE application.merchants (
-    id                  TEXT PRIMARY KEY,
-    name                TEXT NOT NULL,
-    category            TEXT NOT NULL,
-    country_code        VARCHAR(2) NOT NULL,
-    risk_level          SMALLINT NOT NULL DEFAULT 1,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT merchants_id_check CHECK (id ~ '^[0-9a-f]{32}$')
-);
-
--- Devices: device fingerprints (many transactions may share one device).
-CREATE TABLE application.devices (
-    id                  TEXT PRIMARY KEY,
-    fingerprint         TEXT NOT NULL UNIQUE,
-    device_type         TEXT NOT NULL,          -- desktop/mobile/tablet
-    os                  TEXT NOT NULL,
-    browser             TEXT NOT NULL,
-    screen_resolution   TEXT,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT devices_id_check CHECK (id ~ '^[0-9a-f]{32}$')
-);
-
--- Transactions: raw payment transactions. Intentionally carries NO fraud label.
-CREATE TABLE application.transactions (
-    id                      TEXT PRIMARY KEY,
-    user_id                 TEXT NOT NULL,
-    card_id                 TEXT NOT NULL,
-    merchant_id             TEXT NOT NULL,
-    device_id               TEXT NOT NULL,
-    amount_usd              NUMERIC(14,2) NOT NULL,
-    currency                VARCHAR(3) NOT NULL,
-    channel                 TEXT NOT NULL,      -- web, mobile_app, pos
-    billing_country_code    VARCHAR(2) NOT NULL,
-    ip_country_code         VARCHAR(2) NOT NULL,
-    email_purchaser         TEXT,
-    email_recipient         TEXT,
-    status                  TEXT NOT NULL,      -- approved, declined
-    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT transactions_user_fk     FOREIGN KEY (user_id)     REFERENCES application.users(id),
-    CONSTRAINT transactions_card_fk     FOREIGN KEY (card_id)     REFERENCES application.cards(id),
-    CONSTRAINT transactions_device_fk   FOREIGN KEY (device_id)   REFERENCES application.devices(id),
-    CONSTRAINT transactions_merchant_fk FOREIGN KEY (merchant_id) REFERENCES application.merchants(id),
-    CONSTRAINT transactions_amount_check CHECK (amount_usd > 0),
-    CONSTRAINT transactions_id_check     CHECK (id ~ '^[0-9a-f]{32}$')
-);
-
--- Labels: ground truth, separated because fraud outcomes arrive post-hoc.
-CREATE TABLE application.labels (
-    transaction_id      TEXT PRIMARY KEY,
-    label               SMALLINT NOT NULL,      -- 0 = legitimate, 1 = fraud
-    label_source        TEXT NOT NULL,          -- manual_review, chargeback, rule_engine
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT labels_transaction_fk FOREIGN KEY (transaction_id) REFERENCES application.transactions(id),
-    CONSTRAINT labels_value_check CHECK (label IN (0,1))
-);
-"""
-
-POST_LOAD_INDEXES = """
-CREATE INDEX transactions_user_created_idx     ON application.transactions (user_id, created_at DESC);
-CREATE INDEX transactions_card_created_idx     ON application.transactions (card_id, created_at DESC);
-CREATE INDEX transactions_merchant_created_idx ON application.transactions (merchant_id, created_at DESC);
-CREATE INDEX transactions_device_idx           ON application.transactions (device_id);
-CREATE INDEX transactions_created_idx          ON application.transactions (created_at);
-CREATE INDEX cards_user_idx                    ON application.cards (user_id);
-CREATE INDEX labels_label_idx                  ON application.labels (label);
-"""
 
 # --------------------------------------------------------------------------- #
 # Reference pools                                                              #
@@ -228,6 +120,19 @@ RING_DEVICES = 30           # small shared device pool -> strong graph signal
 RING_EMAILS = 50            # shared cash-out recipient emails
 FAMILY_DEVICES = 200        # legit devices shared by 2-3 users (mild, as noise)
 RING_ROUTE_PROB = 0.6       # share of episodes routed through ring infra
+
+# Card testing runs through a handful of weak merchant endpoints (no 3DS, no rate
+# limit), not spread across the whole catalogue. This concentration is what makes
+# merchant-level real-time features (merch_tx_count_10min,
+# merch_distinct_cards_10min) discriminative: at ~800 tx/day over 1500 merchants
+# a random merchant never sees 2 transactions in the same 10 minutes, so without
+# concentration those features would be a constant and the model would ignore them.
+COMPROMISED_MERCHANTS = 25
+
+# A ring's transactions must land close together in time, otherwise
+# device_distinct_users_1h can never observe more than one victim per window.
+# Real device farms do work in sessions, so this is realism, not a fudge.
+RING_SESSION_HOURS = 6
 
 
 # --------------------------------------------------------------------------- #
@@ -456,6 +361,10 @@ def generate_transactions(
     family_dev = [int(x) for x in nprng.choice(non_ring, size=min(FAMILY_DEVICES, len(non_ring)), replace=False)]
     ring_emails = [f"cashout{i:03d}@proton.me" for i in range(RING_EMAILS)]
 
+    # Weak merchant endpoints that card-testing bots abuse (see COMPROMISED_MERCHANTS).
+    compromised = [int(x) for x in nprng.choice(
+        n_merch, size=min(COMPROMISED_MERCHANTS, n_merch), replace=False)]
+
     # Each user's habitual device (a few share a family device).
     home_device = [rng.choice(family_dev) if rng.random() < 0.03 else rng.choice(non_ring)
                    for _ in range(n_users)]
@@ -524,11 +433,16 @@ def generate_transactions(
         dev = episode_device(uidx, own_ok=False)
         base = _time_between(rng, max(card.created_at, now - timedelta(days=days)), now - timedelta(hours=2))
         k = rng.randint(12, 45)
+        # ONE weak endpoint for the whole episode: the bot found a merchant with no
+        # 3DS and no rate limit and keeps hammering it. Concentrating here is what
+        # makes merch_*_10min separate an attacked merchant (25 cards / 10 min)
+        # from a normal one (1 card / 10 min).
+        merch = merchants[rng.choice(compromised)]
         t = base
         for j in range(k):
             t = t + timedelta(seconds=rng.uniform(4, 90))
             ramp = min(0.85, 0.08 + j * 0.03)      # declines climb as issuer reacts
-            emit(user=user, card=card, merch=merchants[rng.randrange(n_merch)], device_idx=dev,
+            emit(user=user, card=card, merch=merch, device_idx=dev,
                  amount=round(rng.uniform(0.2, 6.0), 2), created=t, is_fraud=True,
                  archetype="card_testing", ip=fraud_ip(user), recipient=user.email,
                  status="declined" if rng.random() < ramp else "approved")
@@ -592,12 +506,16 @@ def generate_transactions(
         email = rng.choice(ring_emails)
         emitted = 0
         base = _time_between(rng, now - timedelta(days=days), now - timedelta(days=2))
+        # One WORKING SESSION, not days of drift: the farm cycles its victims over a
+        # few hours. Needed for device_distinct_users_1h to ever see >1 victim in a
+        # window (a ring spread over 3 days looks like a normal shared device).
+        session_end = min(base + timedelta(hours=RING_SESSION_HOURS), now)
         for _ in range(rng.randint(5, 15)):
             uidx = int(nprng.choice(n_users, p=user_weights))
             user = users[uidx]
             card = cards[rng.choice(per_user_cards[uidx])]
             for _ in range(rng.randint(1, 2)):
-                t = _time_between(rng, base, min(base + timedelta(days=3), now))
+                t = _time_between(rng, base, session_end)
                 emit(user=user, card=card, merch=merchants[rng.randrange(n_merch)], device_idx=dev,
                      amount=_near_threshold(rng) if rng.random() < 0.3 else rng.uniform(50, 1500),
                      created=t, is_fraud=True,
@@ -721,160 +639,10 @@ def _draw_created_at(now: datetime, floor: datetime, rng: random.Random, days: i
 # Loading + reporting                                                          #
 # --------------------------------------------------------------------------- #
 
-async def copy_rows(conn: asyncpg.Connection, table: str, columns: list[str], rows: list[tuple]) -> None:
-    """Bulk-insert ``rows`` into ``application.<table>`` via binary COPY."""
-    if rows:
-        await conn.copy_records_to_table(table, schema_name="application", columns=columns, records=rows)
-
-
-async def quality_report(conn: asyncpg.Connection, stats: dict) -> None:
-    """Print a data-quality / realism report emphasising the sophisticated signals."""
-    print("\n" + "=" * 64)
-    print("QUALITY REPORT")
-    print("=" * 64)
-    for table in ("users", "cards", "merchants", "devices", "transactions", "labels"):
-        print(f"  {table:<14}: {await conn.fetchval(f'SELECT COUNT(*) FROM application.{table}'):>9,}")
-
-    fraud = await conn.fetchval("SELECT COUNT(*) FROM application.labels WHERE label = 1")
-    total = await conn.fetchval("SELECT COUNT(*) FROM application.labels")
-    if total:
-        print(f"\n  labeled fraud rate   : {fraud / total:.3%}  ({fraud:,}/{total:,})")
-    print(f"  true fraud tx        : {stats['true_fraud']:,}")
-    print(f"  label noise          : unlabeled={stats['unlabeled_fraud']:,}, "
-          f"mislabeled_legit={stats['mislabeled_fraud']:,}, friendly_fraud={stats['friendly_fraud']:,}")
-
-    share = await conn.fetchval(
-        """WITH pm AS (SELECT merchant_id, COUNT(*) c FROM application.transactions GROUP BY 1),
-                r AS (SELECT c, NTILE(100) OVER (ORDER BY c DESC) pct FROM pm)
-           SELECT SUM(c) FILTER (WHERE pct=1)::float / SUM(c) FROM r""")
-    print(f"  top-1% merchant share: {share:.1%}")
-
-    print("\n  --- separation (harder now: signals overlap) ---")
-    for r in await conn.fetch(
-        """SELECT l.label, AVG((t.billing_country_code<>t.ip_country_code)::int)::float mm,
-                  AVG(t.amount_usd)::float amt, AVG((t.status='declined')::int)::float decl
-           FROM application.transactions t JOIN application.labels l ON l.transaction_id=t.id
-           GROUP BY 1 ORDER BY 1"""):
-        tag = "fraud" if r["label"] == 1 else "legit"
-        print(f"    {tag}: geo_mismatch={r['mm']:.1%}, avg_amount=${r['amt']:,.2f}, declined={r['decl']:.1%}")
-
-    print("\n  --- VELOCITY (card-testing / bust-out bursts) ---")
-    vr = await conn.fetchrow(
-        """SELECT MAX(c) mx, AVG(c)::float av FROM (
-             SELECT card_id, date_trunc('hour', created_at) h, COUNT(*) c
-             FROM application.transactions GROUP BY 1, 2) s""")
-    print(f"    max tx by one card in a single hour: {vr['mx']}  (avg per card-hour: {vr['av']:.2f})")
-    dm = await conn.fetchval(
-        """SELECT MAX(d) FROM (
-             SELECT card_id, date_trunc('hour', created_at) h, COUNT(DISTINCT merchant_id) d
-             FROM application.transactions GROUP BY 1, 2) s""")
-    print(f"    max distinct merchants hit by one card in an hour: {dm}")
-
-    print("\n  --- GRAPH (fraud ring / device farm) ---")
-    gr = await conn.fetch(
-        """SELECT device_id, COUNT(DISTINCT user_id) u, COUNT(*) tx
-           FROM application.transactions GROUP BY 1 ORDER BY u DESC LIMIT 3""")
-    for r in gr:
-        print(f"    device {r['device_id'][:12]}...: {r['u']} distinct users, {r['tx']} tx")
-    re = await conn.fetchval(
-        """SELECT MAX(u) FROM (
-             SELECT email_recipient, COUNT(DISTINCT user_id) u FROM application.transactions
-             WHERE email_recipient IS NOT NULL GROUP BY 1) s""")
-    print(f"    max distinct users sharing one recipient email: {re}")
-
-    if stats.get("archetypes"):
-        print("\n  fraud tx by archetype (episodes):")
-        for name, c in sorted(stats["archetypes"].items(), key=lambda x: -x[1]):
-            print(f"    {name:<20}: {c:,} tx across {stats['episodes'].get(name, 0)} episodes")
-    print("=" * 64)
-
 
 # --------------------------------------------------------------------------- #
 # Orchestration                                                               #
 # --------------------------------------------------------------------------- #
-
-async def run(args: argparse.Namespace) -> int:
-    """Create the schema, generate every table in memory, load and report."""
-    rng = random.Random(args.seed)
-    nprng = np.random.default_rng(args.seed)
-    now = datetime.now(HCM_TZ).replace(microsecond=0)
-    patterns = [p.strip() for p in args.patterns.split(",") if p.strip()]
-
-    print("Generating entities in memory ...")
-    users, user_rows = generate_users(args.users, rng, now)
-    device_rows = generate_devices(args.devices, rng, now)
-    device_ids = [row[0] for row in device_rows]
-    device_types = [row[2] for row in device_rows]
-    merchants, merchant_rows = generate_merchants(args.merchants, rng, now)
-    cards, per_user_cards, card_rows = generate_cards(users, rng, now)
-    print(f"  users={len(user_rows):,} devices={len(device_rows):,} "
-          f"merchants={len(merchant_rows):,} cards={len(card_rows):,}")
-
-    print(f"Generating ~{args.transactions:,} transactions ({args.difficulty}) "
-          f"with patterns={patterns} ...")
-    tx_rows, label_rows, stats = generate_transactions(
-        args.transactions, users, cards, per_user_cards, merchants, device_ids, device_types,
-        rng, nprng, now, args.days, args.fraud_rate, args.label_cutoff_days, patterns, args.difficulty)
-    print(f"  transactions={len(tx_rows):,} labels={len(label_rows):,} "
-          f"true_fraud={stats['true_fraud']:,} episodes={sum(stats['episodes'].values())}")
-
-    conn = await asyncpg.connect(
-        host=os.environ["POSTGRES_HOST"], port=int(os.environ["POSTGRES_PORT"]),
-        user=os.environ["POSTGRES_USER"], password=os.environ["POSTGRES_PASSWORD"],
-        database=os.environ["POSTGRES_DB"])
-    try:
-        print("Creating schema (application.*) ...")
-        await conn.execute(DDL)
-        print("Loading via COPY ...")
-        async with conn.transaction():
-            await copy_rows(conn, "users", ["id", "email", "country_code",
-                            "customer_segment", "kyc_level", "email_verified", "created_at"], user_rows)
-            await copy_rows(conn, "devices", ["id", "fingerprint", "device_type",
-                            "os", "browser", "screen_resolution", "created_at"], device_rows)
-            await copy_rows(conn, "merchants", ["id", "name", "category",
-                            "country_code", "risk_level", "created_at"], merchant_rows)
-            await copy_rows(conn, "cards", ["id", "user_id", "issuer_code",
-                            "country_code", "brand", "type", "bin_code", "is_virtual", "created_at"], card_rows)
-            await copy_rows(conn, "transactions", ["id", "user_id", "card_id",
-                            "merchant_id", "device_id", "amount_usd", "currency", "channel",
-                            "billing_country_code", "ip_country_code", "email_purchaser",
-                            "email_recipient", "status", "created_at"], tx_rows)
-            await copy_rows(conn, "labels", ["transaction_id", "label",
-                            "label_source", "created_at"], label_rows)
-        print("Creating indexes + ANALYZE ...")
-        await conn.execute(POST_LOAD_INDEXES)
-        await conn.execute("ANALYZE application.transactions")
-        await quality_report(conn, stats)
-    finally:
-        await conn.close()
-    print("\nDone.")
-    return 0
-
-
-def build_parser() -> argparse.ArgumentParser:
-    """Build the CLI parser with production-scale defaults."""
-    p = argparse.ArgumentParser(description="Generate sophisticated fake fraud-detection data in Postgres.")
-    p.add_argument("--users", type=int, default=25_000)
-    p.add_argument("--merchants", type=int, default=1_500)
-    p.add_argument("--devices", type=int, default=30_000)
-    p.add_argument("--transactions", type=int, default=300_000)
-    p.add_argument("--days", type=int, default=180, help="History window in days.")
-    p.add_argument("--fraud-rate", type=float, default=0.005,
-                   help="Target TRUE fraud fraction of tx (labeled rate ~0.5% after noise).")
-    p.add_argument("--difficulty", choices=["full", "moderate"], default="full",
-                   help="'full' = realistic overlap + label noise; 'moderate' = more separable.")
-    p.add_argument("--patterns", default="card_testing,account_takeover,bust_out,fraud_ring",
-                   help="Comma-separated fraud archetypes to enable.")
-    p.add_argument("--label-cutoff-days", type=int, default=3,
-                   help="Transactions newer than this stay unlabeled (label delay).")
-    p.add_argument("--seed", type=int, default=42)
-    return p
-
-
-def main() -> int:
-    """Load env, parse args and run the async generator."""
-    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-    return asyncio.run(run(build_parser().parse_args()))
 
 
 if __name__ == "__main__":

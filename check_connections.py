@@ -271,7 +271,11 @@ def _check_topic_configs(cfg: dict) -> None:
     except ImportError:
         print(f"{INFO}(bỏ qua kiểm cleanup.policy: confluent_kafka.admin không có)")
         return
-    admin = AdminClient(cfg)
+    # AdminClient dựng producer bên trong -> truyền key của consumer sẽ bị librdkafka
+    # cảnh báo CONFWARN. Bỏ chúng ra cho log sạch.
+    admin = AdminClient({k: v for k, v in cfg.items()
+                         if k not in ("group.id", "auto.offset.reset",
+                                      "enable.auto.commit")})
     want = {t: p for t, p in REQUIRED_TOPICS.items() if p}
     resources = [ConfigResource(ConfigResource.Type.TOPIC, t) for t in want]
     try:
