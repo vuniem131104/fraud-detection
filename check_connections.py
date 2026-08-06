@@ -193,30 +193,57 @@ def check_kafka() -> None:
     print(f"{INFO}TCP {host}:{port} ok")
     print(f"{INFO}{kafka_conf.describe()}")
 
-    # Dùng Consumer chứ không AdminClient: với SASL/OAUTHBEARER, callback lấy token
-    # chỉ được gọi trong poll(), mà AdminClient không expose poll().
+    # BƯỚC 1 — thử mint token TRỰC TIẾP, tách khỏi handshake với broker.
+    # Nếu bước này fail thì là chuyện ADC/metadata, chưa liên quan tới Kafka.
+    try:
+        tok, exp, principal, ext = kafka_conf._oauth_token_cb("")
+    except Exception as e:                                    # noqa: BLE001
+        raise CheckFailed(
+            f"oauth_cb không mint được token: {type(e).__name__}: {e}",
+            "ADC có hoạt động không? thử `gcloud auth application-default print-access-token` "
+            "hoặc kiểm metadata server trên VM",
+        ) from e
+    left = exp - time.time()
+    print(f"{INFO}token: {len(tok)} ký tự | principal: {principal}")
+    print(f"{INFO}expiry: còn {left/60:.0f} phút | extensions: {ext}")
+    if left <= 0:
+        raise CheckFailed(
+            f"token đã hết hạn ({left:.0f}s)",
+            "creds.expiry là datetime naive-UTC; .timestamp() trực tiếp sẽ lệch "
+            "theo TZ container. Phải replace(tzinfo=timezone.utc) trước",
+        )
+
+    # BƯỚC 2 — handshake thật. Dùng Consumer chứ không AdminClient: với
+    # SASL/OAUTHBEARER, callback lấy token chỉ chạy trong poll(), mà AdminClient
+    # không expose poll().
+    errors: list[str] = []
     cfg = kafka_conf.client_config(**{
         "group.id": "_healthcheck",
         "socket.timeout.ms": TIMEOUT_S * 1000,
+        # Bắt lỗi nền của librdkafka: list_topics() chỉ trả _TRANSPORT chung chung,
+        # còn nguyên nhân thật (SASL/SSL/authz) chỉ xuất hiện ở callback này.
+        "error_cb": lambda err: errors.append(str(err)),
     })
+    if os.environ.get("KAFKA_DEBUG"):
+        cfg["debug"] = os.environ["KAFKA_DEBUG"]
     consumer = Consumer(cfg)
     try:
-        # Vài nhịp poll ngắn để oauth_cb kịp chạy và lấy access token.
+        # Poll LẶP LẠI: oauth_cb chỉ chạy trong poll(), và nó còn phải gọi metadata
+        # server + token endpoint nên một nhịp poll(0.5) thường chưa đủ.
         deadline = time.time() + TIMEOUT_S
         while time.time() < deadline:
-            consumer.poll(0.5)
-            break
+            consumer.poll(0.2)
         try:
             md = consumer.list_topics(timeout=TIMEOUT_S * 2)
         except KafkaException as e:
-            raise CheckFailed(
-                f"không lấy được metadata: {e}",
-                "Nếu log có 'invalid credentials with SASL mechanism OAUTHBEARER' "
-                "thì vấn đề là TOKEN, không phải mạng: oauth_cb phải trả 4-tuple "
-                "(token, expiry_epoch_giây, principal, extensions) — principal là "
-                "email SA và không được rỗng. Nếu không có dòng đó: SA có "
-                "roles/managedkafka.client chưa? VM có scope cloud-platform chưa?",
-            ) from e
+            detail = "; ".join(dict.fromkeys(errors)) or "(không có lỗi nền nào)"
+            hint = ("SA có roles/managedkafka.client trên project chưa? "
+                    "cluster có cùng project/region với .env chưa?")
+            if any("invalid credentials" in x.lower() for x in errors):
+                hint = ("broker từ chối TOKEN. Kiểm principal (phải là email SA, "
+                        "khác rỗng) và 4-tuple của oauth_cb. Chạy lại với "
+                        "KAFKA_DEBUG=security,broker để xem chi tiết handshake")
+            raise CheckFailed(f"{e} | librdkafka: {detail}", hint) from e
 
         print(f"{INFO}broker: {len(md.brokers)}  topic: {len(md.topics)}")
         missing = [t for t in REQUIRED_TOPICS if t not in md.topics]
