@@ -20,8 +20,8 @@ entities:
 # --- Cửa sổ transactions lịch sử -------------------------------------------
 transactions:
   count: 100000
-  start_date: "2026-04-04"     # lịch sử: 27/07/2025 -> 29/07/2026 (368 ngày)
-  end_date:   "2026-08-05"     # EXCLUSIVE -> partition cuối là 2026-07-29
+  start_date: "2026-04-06"     # lịch sử: 27/07/2025 -> 29/07/2026 (368 ngày)
+  end_date:   "2026-08-07"     # EXCLUSIVE -> partition cuối là 2026-07-29
   fraud_rate: 0.005            # tỉ lệ fraud THẬT (labeled rate ~0.5% sau noise)
   difficulty: full             # full = overlap + label noise thật
   patterns: [card_testing, account_takeover, bust_out, fraud_ring]
