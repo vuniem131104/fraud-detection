@@ -275,12 +275,12 @@ Bỏ qua nếu chỉ chạy luồng live.
 
 ```bash
 # sinh 300k giao dịch (27/07/2025 → 29/07/2026) vào Cloud SQL — ~2 phút
-docker compose exec stream-generator python generate_offline.py
+ docker compose run --rm --entrypoint python stream-generator /opt/airflow/repo/generator/generate_offline.py
 
 # export cả năm ra GCS source
 docker compose exec airflow-scheduler bash -lc \
   'cd /opt/airflow/code && python -m include.ops_to_source \
-     --from 2025-07-27 --to 2026-07-29'
+     --from 2026-04-06 --to 2026-08-07'
 ```
 
 Rồi trigger `ml_pipeline` trong UI để chạy DP1 → DP2 → DP3 → materialize.
