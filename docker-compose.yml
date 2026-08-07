@@ -150,15 +150,24 @@ services:
     networks: [dataeng]
     restart: unless-stopped
 
-  # ===================================================================
-  # Airflow 3.x — LocalExecutor, metadata trên Cloud SQL (Private IP)
-  #
-  # Không có depends_on tới database: Cloud SQL nằm ngoài compose. DDL trong sql/
-  # phải apply MỘT LẦN trước khi dựng stack — xem README, thiếu thì DP0 chết với
-  # "schema ops does not exist".
-  # ===================================================================
+  airflow-fs-init:
+    <<: *airflow-common
+    user: "0:0"
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs /opt/airflow/plugins
+        chown -R "${AIRFLOW_UID:-1000}:0" /opt/airflow/logs /opt/airflow/plugins
+        chmod -R g+rwX /opt/airflow/logs /opt/airflow/plugins
+        echo "=> airflow logs/plugins ready (uid ${AIRFLOW_UID:-1000}, gid 0)"
+    restart: on-failure
+
   airflow-init:
     <<: *airflow-common
+    depends_on:
+      airflow-fs-init:
+        condition: service_completed_successfully
     command:
       - bash
       - -c

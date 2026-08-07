@@ -123,8 +123,12 @@ def spark_task(task_id: str, script: str, *args: str) -> DataprocCreateBatchOper
         project_id=os.environ.get("GCP_PROJECT_ID", ""),
         region=DATAPROC_REGION,
         # batch_id chỉ nhận [a-z0-9-]: task_id có dấu _ nên phải đổi.
+        # try_number PHẢI đi qua `ti`: context của Airflow 3 không có key phẳng
+        # try_number, dùng "{{ try_number }}" là UndefinedError lúc render và task
+        # chết trước cả khi submit batch. Nó có mặt ở đây để lần retry tạo batch_id
+        # khác — Dataproc từ chối batch_id trùng bằng ALREADY_EXISTS.
         batch_id=(f"{task_id.replace('_', '-')}-"
-                  "{{ ts_nodash | lower }}-{{ try_number }}"),
+                  "{{ ts_nodash | lower }}-{{ ti.try_number }}"),
         batch=_dataproc_batch(script, list(args)),
     )
 
