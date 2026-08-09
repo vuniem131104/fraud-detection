@@ -25,8 +25,9 @@ chạy lâu hơn dự kiến, và gãy KHÔNG BÁO: DP2 chạy trên Bronze thi�
 báo thành công. Một DAG thì Airflow bảo đảm thứ tự và một task fail sẽ chặn phần
 sau. Trên UI vẫn thấy rõ ba nhóm.
 
-Airflow không tự chạy Spark mà submit **batch Dataproc Serverless**: không có cụm
-Spark nào trên VM, mỗi job là một batch riêng, tính tiền theo thời gian chạy.
+Spark chạy bằng **spark-submit --master local[2] ngay trong container Airflow** —
+không có cụm Spark, không có Dataproc. Xem `spark_task` bên dưới để biết vì sao
+không dùng Dataproc Serverless.
 """
 
 from __future__ import annotations
@@ -37,9 +38,6 @@ from datetime import timedelta
 from pathlib import Path
 
 import pendulum
-from airflow.providers.google.cloud.operators.dataproc import (
-    DataprocCreateBatchOperator,
-)
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import Variable, dag, get_current_context, task, task_group
 
@@ -61,75 +59,64 @@ DIMS = ["users", "cards", "merchants", "devices"]
 DS_HCM = ('{{ (logical_date - macros.timedelta(days=1))'
           '.in_timezone("Asia/Ho_Chi_Minh").strftime("%Y-%m-%d") }}')
 
-# --- Dataproc Serverless ---------------------------------------------------
-# Job Spark KHÔNG chạy trên VM. File .py phải nằm trên GCS (Dataproc không thấy
-# volume của VM), deploy bằng:
-#   gcloud storage rsync -r spark/jobs $DATAPROC_CODE_ROOT
-DATAPROC_CODE_ROOT = os.environ.get("DATAPROC_CODE_ROOT", "")
-DATAPROC_REGION = os.environ.get("DATAPROC_REGION", os.environ.get("GCP_REGION", ""))
+# --- Spark local ------------------------------------------------------------
+# Job Spark chạy NGAY TRONG container Airflow bằng spark-submit --master local.
+# Trước đây là Dataproc Serverless, phải bỏ vì quota CPUS_ALL_REGIONS của project
+# là 12 vCPU còn một batch Serverless tối thiểu đúng 12 (driver 4 + tối thiểu 2
+# executor x 4 core) — VM chiếm 2 nên batch không bao giờ được cấp chỗ. Với ~33 MB
+# lake / 100k giao dịch thì local[2] xử lý trong vài phút.
+#
+# Ba thứ Dataproc lo hộ trước đây giờ nằm trong image (xem Dockerfile): JRE,
+# gcs-connector (đọc/ghi gs://) và JDBC Postgres (dp3_* ghi Cloud SQL).
+SPARK_JOBS_DIR = os.environ.get("SPARK_JOBS_DIR", "/opt/airflow/spark/jobs")
+SPARK_MASTER = os.environ.get("SPARK_MASTER", "local[2]")
+SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "3g")
+SPARK_JARS = ("/opt/spark-jars/gcs-connector-shaded.jar,"
+              "/opt/spark-jars/postgresql.jar")
+SHARED_MODULE = f"{os.environ.get('SHARED_DIR', '/opt/airflow/shared')}/feature_windows.py"
+
+# gcs-connector không tự đăng ký: Hadoop chỉ biết scheme `gs` khi được chỉ đúng
+# hai implementation class này. auth.type=APPLICATION_DEFAULT để nó dùng service
+# account gắn trên VM qua metadata server, không cần keyfile trong image.
+SPARK_CONF = {
+    "spark.hadoop.fs.gs.impl":
+        "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem",
+    "spark.hadoop.fs.AbstractFileSystem.gs.impl":
+        "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS",
+    "spark.hadoop.fs.gs.auth.type": "APPLICATION_DEFAULT",
+    # Ghi parquet thẳng ra GCS: committer mặc định của Hadoop dựa vào rename
+    # nguyên tử, thứ GCS KHÔNG có (rename = copy + delete từng object). Bản v2
+    # ghi thẳng vào thư mục đích, tránh pha rename khổng lồ ở cuối job.
+    "spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version": "2",
+    # Container chạy bằng uid rời (AIRFLOW_UID), có lúc không có entry trong
+    # /etc/passwd -> JVM resolve user.home thành "?" và spark-submit chết ngay
+    # với `basedir must be absolute: ?/.ivy2/local`, trước khi chạm tới job.
+    "spark.jars.ivy": "/tmp/.ivy2",
+}
 
 
-def _dataproc_batch(script: str, args: list[str]) -> dict:
-    """Cấu hình một PySpark batch trên Dataproc Serverless.
+def spark_task(task_id: str, script: str, *args: str) -> BashOperator:
+    """Một task Spark = một tiến trình spark-submit local trong container Airflow.
 
-    Hai thứ BẮT BUỘC ship kèm, thiếu là job chết ngay:
-      * ``python_file_uris``  -> shared/feature_windows.py. dp3_* import module này
-        qua SHARED_DIR, thứ chỉ tồn tại vì docker-compose mount ./shared. Trên
-        Dataproc không có mount nào.
-      * ``jar_file_uris``     -> driver JDBC Postgres. Dataproc Serverless không
-        chắc ra được Maven nên đưa jar lên GCS.
+    Env của job không phải truyền tay: BashOperator kế thừa env của container, mà
+    docker-compose đã nạp .env vào đó -> job đọc thẳng LAKE_ROOT / PG_HOST /
+    AIRFLOW_USER / AIRFLOW_PASSWORD qua os.environ. PG_DB thì phải map vì .env gọi
+    nó là WAREHOUSE_POSTGRES_DB.
 
-    Env của job truyền bằng ``spark.dataproc.driverEnv.*``: các job đọc os.environ
-    (LAKE_ROOT, PG_*), mà Dataproc Serverless không có cách nào khác để set env.
+    ``--py-files`` ship shared/feature_windows.py cho dp3_*: local mode vẫn chạy
+    driver trong JVM riêng nên PYTHONPATH của container không tự chảy vào job.
     """
-    props = {
-        f"spark.dataproc.driverEnv.{k}": v
-        for k, v in {
-            "LAKE_ROOT": os.environ.get("LAKE_ROOT", ""),
-            "PG_HOST": os.environ.get("PG_HOST", ""),
-            "PG_DB": os.environ.get("WAREHOUSE_POSTGRES_DB", "warehouse"),
-            "PG_USER": os.environ.get("AIRFLOW_USER", ""),
-            # CẢNH BÁO: property của batch đọc được bằng `gcloud dataproc batches
-            # describe`. Môi trường thật nên chuyển sang Secret Manager.
-            "PG_PASSWORD": os.environ.get("AIRFLOW_PASSWORD", ""),
-        }.items() if v
-    }
-    exec_cfg = {
-        k: v for k, v in {
-            "service_account": os.environ.get("DATAPROC_SERVICE_ACCOUNT", ""),
-            "subnetwork_uri": os.environ.get("DATAPROC_SUBNET", ""),
-        }.items() if v
-    }
-    batch: dict = {
-        "pyspark_batch": {
-            "main_python_file_uri": f"{DATAPROC_CODE_ROOT.rstrip('/')}/{script}",
-            "args": args,
-        },
-        "runtime_config": {"properties": props},
-    }
-    if pyfiles := os.environ.get("DATAPROC_PYFILES", ""):
-        batch["pyspark_batch"]["python_file_uris"] = pyfiles.split(",")
-    if jars := os.environ.get("DATAPROC_JDBC_JAR", ""):
-        batch["pyspark_batch"]["jar_file_uris"] = jars.split(",")
-    if exec_cfg:
-        batch["environment_config"] = {"execution_config": exec_cfg}
-    return batch
-
-
-def spark_task(task_id: str, script: str, *args: str) -> DataprocCreateBatchOperator:
-    """Một task Spark = một batch Dataproc Serverless."""
-    return DataprocCreateBatchOperator(
+    conf = " ".join(f'--conf "{k}={v}"' for k, v in SPARK_CONF.items())
+    quoted = " ".join(f"'{a}'" for a in args)
+    return BashOperator(
         task_id=task_id,
-        project_id=os.environ.get("GCP_PROJECT_ID", ""),
-        region=DATAPROC_REGION,
-        # batch_id chỉ nhận [a-z0-9-]: task_id có dấu _ nên phải đổi.
-        # try_number PHẢI đi qua `ti`: context của Airflow 3 không có key phẳng
-        # try_number, dùng "{{ try_number }}" là UndefinedError lúc render và task
-        # chết trước cả khi submit batch. Nó có mặt ở đây để lần retry tạo batch_id
-        # khác — Dataproc từ chối batch_id trùng bằng ALREADY_EXISTS.
-        batch_id=(f"{task_id.replace('_', '-')}-"
-                  "{{ ts_nodash | lower }}-{{ ti.try_number }}"),
-        batch=_dataproc_batch(script, list(args)),
+        bash_command=(
+            'export PG_DB="${WAREHOUSE_POSTGRES_DB:-warehouse}"; '
+            f"exec spark-submit --master {SPARK_MASTER} "
+            f"--driver-memory {SPARK_DRIVER_MEMORY} "
+            f"--jars {SPARK_JARS} --py-files {SHARED_MODULE} {conf} "
+            f"{SPARK_JOBS_DIR}/{script} {quoted}"
+        ),
     )
 
 
@@ -217,6 +204,9 @@ def ml_pipeline():
             "gold_fact", "dp2_silver_to_gold.py", "--stage", "fact", "--date", DS_HCM)
         # SCD2 đọc snapshot dim ở Bronze, không phụ thuộc Silver -> chạy song song
         # với gold_fact được. Nhưng DP3 cần CẢ HAI xong.
+        # LƯU Ý sau khi bỏ Dataproc: song song = HAI JVM Spark cùng lúc trên VM,
+        # mỗi cái SPARK_DRIVER_MEMORY. Với e2-standard-4 (16 GB) thì 2x3 GB nằm
+        # gọn cạnh Flink + Airflow; hạ VM xuống 8 GB thì phải giảm còn 1 pool.
         gold_dims = spark_task(
             "gold_dims", "dp2_silver_to_gold.py", "--stage", "dims")
         bronze_to_silver >> [gold_fact, gold_dims]

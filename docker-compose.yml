@@ -1,5 +1,5 @@
 # =====================================================================
-# Data pipeline — chạy trên VM GCP (e2-standard-2: 2 vCPU / 8 GB / 50 GB)
+# Data pipeline — chạy trên VM GCP (e2-standard-4: 4 vCPU / 16 GB / 50 GB)
 #
 #   docker compose up -d
 #   docker compose ps
@@ -11,10 +11,10 @@
 #   Memorystore Redis       <- online feature store của Feast
 #   Managed Kafka           <- topic transactions + 2 topic kết quả Flink
 #   Cloud Storage           <- data lake 4 tầng medallion
-#   Dataproc Serverless     <- job Spark DP2/DP3, submit theo từng job
 #
-# Trên VM: Airflow (điều phối) + Flink (streaming 24/7) + 3 service streaming.
-# Trần RAM ~4,6 GB / 8 GB.
+# Trên VM: Airflow (điều phối) + Flink (streaming 24/7) + 3 service streaming
+# + Spark chạy local trong container Airflow khi DP2/DP3 tới lượt.
+# Trần RAM ~4,6 GB nền + tối đa 2 x 3 GB Spark = ~10,6 GB / 16 GB.
 #
 # VM là STATELESS: volume duy nhất có state là checkpoint của Flink (~1,5 MB).
 # Xoá VM rồi dựng lại chỉ cần .env.
@@ -41,19 +41,13 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "600"
     AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: "600"
     TZ: Asia/Ho_Chi_Minh
-    # Connection cho mọi hook Google (DataprocCreateBatchOperator mặc định dùng
-    # gcp_conn_id="google_cloud_default"). Airflow 3 BỎ `db init` — `db migrate`
-    # chỉ tạo schema chứ không seed connection mặc định nữa, nên thiếu dòng này
-    # là task chết ngay lúc khởi tạo hook:
-    #   AirflowNotFoundException: The conn_id `google_cloud_default` isn't defined
-    # Khai báo bằng env var thay vì `airflow connections add`: không để state
-    # trong metadata DB, và api-server — nơi Task SDK hỏi connection qua
-    # execution API — đọc được nhờ EnvironmentVariablesBackend (secrets backend
-    # đứng trước metastore). x-airflow-common gắn env này cho MỌI container nên
-    # scheduler/dag-processor/api-server đều thấy.
-    # Để TRỐNG credentials là cố ý: GoogleBaseHook rơi về ADC = service account
-    # gắn trên VM (xem comment GOOGLE_APPLICATION_CREDENTIALS trong .env).
-    AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT: '{"conn_type": "google_cloud_platform", "extra": {"project": "${GCP_PROJECT_ID:?set GCP_PROJECT_ID trong .env}"}}'
+    # --- Spark local ------------------------------------------------------
+    # DP2/DP3 chạy spark-submit ngay trong container này (xem spark_task trong
+    # ml_pipeline.py). local[2]: VM e2-standard-4 có 4 vCPU, chừa 2 core cho
+    # Flink + scheduler khi hai task Spark chạy song song.
+    SPARK_MASTER: ${SPARK_MASTER:-local[2]}
+    SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-3g}
+    SPARK_JOBS_DIR: /opt/airflow/spark/jobs
     # shared + feature_store PHẢI nằm trên PYTHONPATH. udf của ODFV bị dill pickle
     # vào registry THEO THAM CHIẾU tới module (feature_views, feature_windows), nên
     # mọi client mở registry (materialize, get_online_features) đều unpickle nó
@@ -68,10 +62,14 @@ x-airflow-common: &airflow-common
     - ./airflow/plugins:/opt/airflow/plugins
     - ./shared:/opt/airflow/shared:ro
     - ./feature_store:/opt/airflow/feature_store
+    # Job Spark chạy tại chỗ nên chỉ cần mount, không phải rsync lên GCS như hồi
+    # dùng Dataproc. Sửa job xong là lần chạy sau ăn ngay, không cần deploy.
+    - ./spark/jobs:/opt/airflow/spark/jobs:ro
     - ./generator:/opt/airflow/repo/generator
     - ./.env:/opt/airflow/repo/.env:ro
-    # KHÔNG mount /var/run/docker.sock: Spark chạy trên Dataproc nên DAG không cần
-    # `docker exec`. Bỏ được nghĩa là Airflow không có quyền root trên host.
+    # KHÔNG mount /var/run/docker.sock: Spark chạy NGAY TRONG container này bằng
+    # spark-submit local, DAG không cần `docker exec` ra container khác. Bỏ được
+    # nghĩa là Airflow không có quyền root trên host.
   user: "${AIRFLOW_UID:-1000}:0"
   networks: [dataeng]
 

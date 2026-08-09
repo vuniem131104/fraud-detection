@@ -27,7 +27,7 @@ là dịch vụ managed, VM chỉ chạy phần compute.
                    │                    │
                    ▼                    ▼
     GCS  source → raw → staging → curated      Memorystore Redis
-              (DP1)   (DP2 Spark trên Dataproc)   (online store)
+              (DP1)   (DP2 Spark local trên VM)   (online store)
                             │                         ▲
                             ▼                         │
               Cloud SQL: warehouse.application.feat_* ─┘
@@ -48,7 +48,7 @@ tính trên cùng một tập giao dịch nên không thể phân kỳ.
 | Online feature store | **Memorystore Redis** |
 | Kafka | **Managed Service for Apache Kafka** |
 | Data lake (4 tầng medallion) | **Cloud Storage** |
-| Spark (DP2, DP3) | **Dataproc Serverless**, submit theo job |
+| Spark (DP2, DP3) | **VM**, `spark-submit --master local[2]` trong container Airflow |
 
 VM là **stateless**: volume duy nhất có state là checkpoint Flink (~1,5 MB). Xoá
 VM rồi dựng lại chỉ cần `.env`.
@@ -99,8 +99,7 @@ bridge và DAG đều đọc từ đó — sửa một chỗ, không lệch đ�
 - **Memorystore** Redis (Private IP, cùng VPC).
 - **Managed Kafka** cluster.
 - **GCS** bucket cho data lake.
-- **Service account** cho VM: `roles/storage.objectAdmin`, `roles/dataproc.editor`,
-  `roles/dataproc.worker`, `roles/managedkafka.client`.
+- **Service account** cho VM: `roles/storage.objectAdmin`, `roles/managedkafka.client`.
   Không cần `roles/cloudsql.client` — Private IP dùng user/password của Postgres.
 
 ### 3.2 Ba topic Kafka
@@ -127,7 +126,7 @@ không compact thì topic phình vô hạn.
 ```bash
 gcloud compute instances create fraud-detection \
   --zone=us-central1-a \
-  --machine-type=e2-standard-2 \
+  --machine-type=e2-standard-4 \
   --subnet=default \
   --service-account=<sa>@<project>.iam.gserviceaccount.com \
   --scopes=https://www.googleapis.com/auth/cloud-platform \
@@ -136,7 +135,7 @@ gcloud compute instances create fraud-detection \
 ```
 
 `--scopes=cloud-platform` là **bắt buộc**. Scope mặc định gồm
-`devstorage.read_only` → DP0 không ghi được GCS, và Dataproc/Kafka bị chặn **dù
+`devstorage.read_only` → DP0 không ghi được GCS, và Spark/Kafka bị chặn **dù
 IAM đúng hoàn toàn**. Scope là lớp chặn nằm trước IAM.
 
 Yêu cầu network để nối Cloud SQL qua Private IP:
@@ -158,25 +157,18 @@ sudo usermod -aG docker $USER && exit    # logout/login để group có hiệu l
 sudo apt-get update && sudo apt-get install -y git
 ```
 
-### 3.4 Đẩy code Spark lên GCS
+### 3.4 Code Spark
 
-Dataproc không thấy volume của VM:
+Không phải deploy gì. `docker-compose.yml` mount `./spark/jobs` vào container
+Airflow, job chạy bằng `spark-submit --master local[2]` ngay tại đó — sửa job
+xong là lần chạy sau ăn ngay.
 
-```bash
-gcloud storage rsync -r spark/jobs             $DATAPROC_CODE_ROOT
-gcloud storage cp shared/feature_windows.py    gs://<bucket>/code/
-gcloud storage cp postgresql-42.7.4.jar        gs://<bucket>/jars/
-```
+Hai thứ Dataproc từng lo hộ nay nằm sẵn trong image (xem `Dockerfile`):
 
-Hai file cuối **bắt buộc**:
+- **gcs-connector** — job đọc/ghi thẳng `gs://`, Hadoop không tự hiểu scheme này.
+- **JDBC Postgres** — `dp3_*` ghi `feat_*` vào Cloud SQL.
 
-- `feature_windows.py` — `dp3_*` import nó qua `SHARED_DIR`, thứ chỉ tồn tại nhờ
-  docker mount. Ship qua `DATAPROC_PYFILES`.
-- JDBC jar — Dataproc Serverless không chắc ra được Maven. Ship qua
-  `DATAPROC_JDBC_JAR`. Lấy jar tại
-  `https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/`.
-
-Chạy lại `rsync` mỗi lần sửa job Spark.
+`shared/feature_windows.py` được ship cho job qua `--py-files`.
 
 ### 3.5 Áp DDL lên Cloud SQL
 
@@ -210,7 +202,7 @@ Idempotent, chạy lại vô hại.
 | `KAFKA_BOOTSTRAP` | `gcloud managed-kafka clusters describe <c> --location=<r>` |
 | `LAKE_ROOT` | `gs://<bucket>/` (1 bucket, 4 prefix) hoặc `gs://` (4 bucket riêng) |
 | `AIRFLOW_JWT_SECRET` | `openssl rand -hex 32` |
-| `DATAPROC_*` | project/region/SA/subnet + URI của pyfiles và JDBC jar |
+| `SPARK_MASTER`, `SPARK_DRIVER_MEMORY` | `local[2]` / `3g` — mặc định đã hợp e2-standard-4 |
 
 `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` và `FEAST_REGISTRY_PATH` là URL nên **phải
 ghi lại Private IP**, không đọc được `PG_HOST`.
@@ -331,8 +323,8 @@ gcloud storage ls "$LAKE_ROOT"source/transactions/ | head
 # Flink đã ra kết quả chưa
 gcloud managed-kafka topics describe merchant_rt_10min --cluster=<c> --location=<r>
 
-# Dataproc batch (sau khi ml_pipeline chạy)
-gcloud dataproc batches list --region=us-central1 --limit=5
+# Log Spark (chạy trong chính task Airflow)
+docker compose logs -f airflow-scheduler | grep spark-submit
 ```
 
 ---
@@ -378,9 +370,9 @@ bằng luôn `logical_date` → dùng nó sẽ sai ngày.
 | `SSL connection is required` | instance bật Enforce SSL — code không set `sslmode`, phải tắt hoặc sửa 3 hàm DSN |
 | DP0 không ghi được GCS | VM thiếu scope `cloud-platform` |
 | Flink job RUNNING nhưng topic sink rỗng | thiếu jar `managed-kafka-auth-login-handler` ở TaskManager |
-| Dataproc fail `ModuleNotFoundError: feature_windows` | chưa upload `DATAPROC_PYFILES` |
-| Dataproc fail `No suitable driver` | chưa upload `DATAPROC_JDBC_JAR` |
-| Dataproc fail `KeyError: 'LAKE_ROOT'` | `driverEnv` chưa truyền — kiểm `LAKE_ROOT` trong `.env` |
+| Spark fail `ModuleNotFoundError: feature_windows` | `./shared` chưa được mount vào container |
+| Spark fail `No suitable driver` | image cũ, chưa có `/opt/spark-jars/postgresql.jar` — build lại |
+| Spark fail `KeyError: 'LAKE_ROOT'` | thiếu `LAKE_ROOT` trong `.env` |
 | `ModuleNotFoundError: feature_windows` / `feature_views` trong Airflow | `PYTHONPATH` thiếu `shared` + `feature_store` |
 | `dag-processor` restart liên tục | `airflow/logs` không cho uid 1000 ghi: `docker compose exec -u 0 airflow-scheduler chown -R 1000:0 /opt/airflow/logs` |
 | Giá trị real-time luôn 0 | đúng hành vi nếu entity im lặng > 420s (merchant) / 660s (device) |
@@ -390,9 +382,10 @@ bằng luôn `logical_date` → dùng nó sẽ sai ngày.
 
 ## 9. Chưa làm
 
-- **Terraform** cho GCS/Dataproc/IAM/VM.
-- **Secret Manager**: `spark.dataproc.driverEnv.PG_PASSWORD` đọc được bằng
-  `gcloud dataproc batches describe`.
+- **Terraform** cho GCS/IAM/VM.
+- **Secret Manager**: mật khẩu Postgres hiện nằm trong `.env` và đi vào job Spark
+  qua env của container. (Rò rỉ cũ — `spark.dataproc.driverEnv.PG_PASSWORD` đọc
+  được bằng `gcloud dataproc batches describe` — đã hết cùng với Dataproc.)
 - **DP1 dùng server-side copy** của GCS thay vì kéo bytes qua VM (`copy_file` của
   pyarrow tải xuống rồi đẩy lên lại — không sao ở nhịp 1 file/ngày, nhưng backfill
   368 partition sẽ kéo ~262 MB vô ích).

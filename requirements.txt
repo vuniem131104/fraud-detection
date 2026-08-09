@@ -13,12 +13,17 @@ uvicorn>=0.37.0
 apache-airflow-providers-fab
 confluent-kafka
 
-# providers-google : DataprocCreateBatchOperator — ml_pipeline import ở module
-#                    level nên thiếu là DAG fail parse, không phải fail lúc chạy.
-# google-auth      : access token cho SASL/OAUTHBEARER của Managed Kafka
-#                    (airflow/include/kafka_conf.py + generator/ops_store.py).
+# google-auth : access token cho SASL/OAUTHBEARER của Managed Kafka
+#               (airflow/include/kafka_conf.py + generator/ops_store.py).
 #
 # GCS KHÔNG cần thư viện thêm: pyarrow 18 đã bundle GcsFileSystem và đọc
 # credential qua ADC/metadata server bằng C++, không qua google-auth.
-apache-airflow-providers-google
+#
+# apache-airflow-providers-google đã BỎ: thứ duy nhất dùng nó là
+# DataprocCreateBatchOperator, mà DP2/DP3 giờ chạy spark-submit local.
 google-auth
+
+# Spark chạy local trong chính container Airflow. Bám dòng 3.5 chứ KHÔNG lên 4.x:
+# Spark 4 bật ANSI mode mặc định, đủ để mấy phép cast trong dp2_*/dp3_* đang im
+# lặng trả NULL chuyển thành ném lỗi giữa chừng.
+pyspark==3.5.9
