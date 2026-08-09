@@ -26,8 +26,7 @@ báo thành công. Một DAG thì Airflow bảo đảm thứ tự và một task
 sau. Trên UI vẫn thấy rõ ba nhóm.
 
 Spark chạy bằng **spark-submit --master local[2] ngay trong container Airflow** —
-không có cụm Spark, không có Dataproc. Xem `spark_task` bên dưới để biết vì sao
-không dùng Dataproc Serverless.
+không có cụm Spark riêng. Xem `spark_task` bên dưới để biết vì sao.
 """
 
 from __future__ import annotations
@@ -66,8 +65,8 @@ DS_HCM = ('{{ (logical_date - macros.timedelta(days=1))'
 # executor x 4 core) — VM chiếm 2 nên batch không bao giờ được cấp chỗ. Với ~33 MB
 # lake / 100k giao dịch thì local[2] xử lý trong vài phút.
 #
-# Ba thứ Dataproc lo hộ trước đây giờ nằm trong image (xem Dockerfile): JRE,
-# gcs-connector (đọc/ghi gs://) và JDBC Postgres (dp3_* ghi Cloud SQL).
+# Ba thứ image phải tự mang (xem Dockerfile): JRE, gcs-connector (đọc/ghi
+# gs://) và JDBC Postgres (dp3_* ghi Cloud SQL).
 SPARK_JOBS_DIR = os.environ.get("SPARK_JOBS_DIR", "/opt/airflow/spark/jobs")
 SPARK_MASTER = os.environ.get("SPARK_MASTER", "local[2]")
 SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "3g")
@@ -209,7 +208,7 @@ def ml_pipeline():
             "gold_fact", "dp2_silver_to_gold.py", "--stage", "fact", "--date", DS_HCM)
         # SCD2 đọc snapshot dim ở Bronze, không phụ thuộc Silver -> chạy song song
         # với gold_fact được. Nhưng DP3 cần CẢ HAI xong.
-        # LƯU Ý sau khi bỏ Dataproc: song song = HAI JVM Spark cùng lúc trên VM,
+        # LƯU Ý: song song = HAI JVM Spark cùng lúc trên VM,
         # mỗi cái SPARK_DRIVER_MEMORY. Với e2-standard-4 (16 GB) thì 2x3 GB nằm
         # gọn cạnh Flink + Airflow; hạ VM xuống 8 GB thì phải giảm còn 1 pool.
         gold_dims = spark_task(

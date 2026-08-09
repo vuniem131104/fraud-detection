@@ -5,18 +5,11 @@
 (bỏ ~1% duplicate đã tiêm), rồi ghi ``staging/transactions`` (Silver) partition
 theo ``event_date``.
 
-Chạy như batch Dataproc Serverless (DAG ml_pipeline tự submit)::
+Chạy bằng spark-submit trong container Airflow (DAG ml_pipeline tự gọi, xem
+`spark_task`)::
 
-    gcloud dataproc batches submit pyspark \\
-      $DATAPROC_CODE_ROOT/dp2_bronze_to_silver.py \\
-      --region=$DATAPROC_REGION \\
-      --py-files=$DATAPROC_PYFILES --jars=$DATAPROC_JDBC_JAR \\
-      -- --date all        # backfill toàn bộ
-    gcloud dataproc batches submit pyspark \\
-      $DATAPROC_CODE_ROOT/dp2_bronze_to_silver.py \\
-      --region=$DATAPROC_REGION \\
-      --py-files=$DATAPROC_PYFILES --jars=$DATAPROC_JDBC_JAR \\
-      -- --date 2026-07-23  # incremental 1 ngày
+    spark-submit ... dp2_bronze_to_silver.py --date all         # backfill
+    spark-submit ... dp2_bronze_to_silver.py --date 2026-08-08  # 1 ngày
 
 Đường dẫn data lake lấy từ env LAKE_ROOT (gs://...).
 """
@@ -41,8 +34,8 @@ STG = f"{LAKE_ROOT}staging/transactions"
 def build_spark() -> SparkSession:
     """SparkSession đọc/ghi GCS.
 
-    Không set cấu hình filesystem nào: Dataproc Serverless đã có sẵn
-    gcs-connector và tự dùng service account của job.
+    Cấu hình filesystem (gcs-connector + auth ADC) do spark-submit truyền
+    vào bằng --conf, xem SPARK_CONF trong airflow/dags/ml_pipeline.py.
     """
     return (
         SparkSession.builder.appName("dp2_bronze_to_silver")
@@ -73,9 +66,16 @@ def main() -> None:
         df = df.withColumn("auth_3ds_flag", F.lit(None).cast(BooleanType()))
 
     # --- dedup theo id (bỏ duplicate đã tiêm) ---
-    before = df.count()
+    #
+    # Hai con số này chỉ để log, nhưng viết thành `df.count()` rồi
+    # `df.dropDuplicates(...).count()` thì mỗi cái là MỘT action riêng: đo trên
+    # history server (app dp2_bronze_to_silver, backfill 100k dòng) thấy các stage
+    # `count` ngốn 39,9s / 124,9s executor time = 32% cả job, chỉ để in một dòng.
+    # Gộp vào một `agg` -> một action duy nhất quét một lượt.
+    stats = df.agg(F.count(F.lit(1)).alias("n"),
+                   F.countDistinct("id").alias("uniq")).first()
+    before, after = stats["n"], stats["uniq"]
     df = df.dropDuplicates(["id"])
-    after = df.count()
     print(f"[DP2] date={args.date}: rows {before:,} -> {after:,} "
           f"(removed {before - after:,} duplicates)")
 

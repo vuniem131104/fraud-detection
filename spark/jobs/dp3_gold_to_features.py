@@ -21,13 +21,10 @@ phân biệt được hai thứ đó thì logic mới rõ ràng.
 KHÔNG lưu sẵn: ``account_age_days`` / ``card_age_days`` / ``device_age_hours``
 (đổi mỗi giây) -> lưu ``*_created_at`` / ``*_first_seen_at`` rồi trừ lúc request.
 
-Chạy như batch Dataproc Serverless (DAG ml_pipeline tự submit)::
+Chạy bằng spark-submit trong container Airflow (DAG ml_pipeline tự gọi, xem
+`spark_task`)::
 
-    gcloud dataproc batches submit pyspark \\
-      $DATAPROC_CODE_ROOT/dp3_gold_to_features.py \\
-      --region=$DATAPROC_REGION \\
-      --py-files=$DATAPROC_PYFILES --jars=$DATAPROC_JDBC_JAR \\
-      -- --date all
+    spark-submit ... dp3_gold_to_features.py --date all
 """
 
 from __future__ import annotations
@@ -59,8 +56,8 @@ PG_SCHEMA = "application"
 def build_spark() -> SparkSession:
     """SparkSession đọc/ghi GCS.
 
-    Không set cấu hình filesystem nào: Dataproc Serverless đã có sẵn
-    gcs-connector và tự dùng service account của job.
+    Cấu hình filesystem (gcs-connector + auth ADC) do spark-submit truyền
+    vào bằng --conf, xem SPARK_CONF trong airflow/dags/ml_pipeline.py.
     """
     return (
         SparkSession.builder.appName("dp3_gold_to_features")

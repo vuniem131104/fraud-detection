@@ -163,7 +163,7 @@ Không phải deploy gì. `docker-compose.yml` mount `./spark/jobs` vào contain
 Airflow, job chạy bằng `spark-submit --master local[2]` ngay tại đó — sửa job
 xong là lần chạy sau ăn ngay.
 
-Hai thứ Dataproc từng lo hộ nay nằm sẵn trong image (xem `Dockerfile`):
+Hai thứ bắt buộc phải có sẵn trong image (xem `Dockerfile`):
 
 - **gcs-connector** — job đọc/ghi thẳng `gs://`, Hadoop không tự hiểu scheme này.
 - **JDBC Postgres** — `dp3_*` ghi `feat_*` vào Cloud SQL.
@@ -290,13 +290,16 @@ chi phí bậc hai theo số dòng của key.
 Bỏ qua nếu chỉ chạy luồng live.
 
 ```bash
-# sinh 300k giao dịch (27/07/2025 → 29/07/2026) vào Cloud SQL — ~2 phút
+# sinh 100k giao dịch (08/04/2026 → 08/08/2026, 123 ngày) vào Cloud SQL — ~2 phút
  docker compose run --rm --entrypoint python stream-generator /opt/airflow/repo/generator/generate_offline.py
 
-# export cả năm ra GCS source
+# export toàn bộ cửa sổ lịch sử ra GCS source.
+# --to là INCLUSIVE: 2026-08-08 là partition cuối mà generator sinh ra
+# (end_date trong generator_config.yaml là exclusive). Muốn kèm cả ngày live
+# hôm nay thì để --to là ngày hiện tại, partition đó sẽ là dữ liệu dở dang.
 docker compose exec airflow-scheduler bash -lc \
   'cd /opt/airflow/code && python -m include.ops_to_source \
-     --from 2026-04-06 --to 2026-08-07'
+     --from 2026-04-08 --to 2026-08-08'
 ```
 
 Rồi trigger `ml_pipeline` trong UI để chạy DP1 → DP2 → DP3 → materialize.
@@ -357,7 +360,7 @@ docker compose logs -f airflow-scheduler | grep spark-submit
 
 **Vì sao Flink ở lại VM thay vì dùng managed.** GCP không có managed Flink
 first-party (Dataflow chạy Beam → phải viết lại `realtime_features.sql`; Dataproc
-có Flink nhưng là cluster thường trú, đắt hơn cả VM). Tải thật ~815 giao dịch/ngày
+có Flink nhưng là cluster thường trú, đắt hơn cả VM). Tải thật ~813 giao dịch/ngày
 = 0,0094 msg/s, đo được 0,97% CPU — mọi managed service đều có sàn chi phí lớn hơn
 2,3 GB RAM ở đây.
 
@@ -408,9 +411,8 @@ bằng luôn `logical_date` → dùng nó sẽ sai ngày.
 
 - **Terraform** cho GCS/IAM/VM.
 - **Secret Manager**: mật khẩu Postgres hiện nằm trong `.env` và đi vào job Spark
-  qua env của container. (Rò rỉ cũ — `spark.dataproc.driverEnv.PG_PASSWORD` đọc
-  được bằng `gcloud dataproc batches describe` — đã hết cùng với Dataproc.)
+  qua env của container.
 - **DP1 dùng server-side copy** của GCS thay vì kéo bytes qua VM (`copy_file` của
   pyarrow tải xuống rồi đẩy lên lại — không sao ở nhịp 1 file/ngày, nhưng backfill
-  368 partition sẽ kéo ~262 MB vô ích).
+  123 partition sẽ kéo lại toàn bộ ~25 MB của source vô ích).
 - **Label delay thật** (chargeback 30–120 ngày): hiện giả định label tức thời.

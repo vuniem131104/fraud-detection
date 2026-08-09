@@ -378,7 +378,7 @@ def check_service_account() -> None:
     print(f"{INFO}scope: {' '.join(s.rsplit('/', 1)[-1] for s in scopes)}")
     raise CheckFailed(
         "VM không có scope cloud-platform",
-        "Scope là lớp chặn nằm TRƯỚC IAM: thiếu nó thì GCS/Dataproc/Kafka bị chặn "
+        "Scope là lớp chặn nằm TRƯỚC IAM: thiếu nó thì GCS/Kafka bị chặn "
         "dù role đã đúng. Sửa: stop VM rồi "
         "`gcloud compute instances set-service-account <vm> --zone=<z> "
         f"--service-account=<sa> --scopes={full}`",

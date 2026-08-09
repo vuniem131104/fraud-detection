@@ -2,13 +2,10 @@ ARG AIRFLOW_VERSION=3.2.2
 ARG PYTHON_VERSION=3.12
 FROM apache/airflow:slim-${AIRFLOW_VERSION}-python${PYTHON_VERSION}
 
-# Spark chạy NGAY TRONG container này (local[*]), không còn submit lên Dataproc
-# Serverless. Lý do: quota CPUS_ALL_REGIONS của project là 12 vCPU, mà một batch
-# Serverless tối thiểu đã ngốn đúng 12 (driver 4 + tối thiểu 2 executor x 4
-# core) — VM đã chiếm 2 nên không bao giờ đủ chỗ. Cả data lake ~33 MB / 100k
-# giao dịch nên local[2] thừa sức.
+# Spark chạy NGAY TRONG container này (--master local[2]) chứ không có cụm
+# Spark riêng: cả data lake ~33 MB / 100k giao dịch nên 2 core là thừa.
 #
-# Ba thứ Dataproc lo hộ trước đây, giờ image phải tự mang:
+# Vì không có cụm managed nào lo hộ, image phải tự mang đủ ba thứ:
 #   * JVM           — pyspark chỉ cần JRE, không cần JDK
 #   * gcs-connector — job đọc/ghi thẳng gs://, Hadoop không hiểu scheme này
 #   * JDBC Postgres — dp3_* ghi feat_* vào Cloud SQL

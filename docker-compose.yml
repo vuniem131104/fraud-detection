@@ -62,8 +62,8 @@ x-airflow-common: &airflow-common
     - ./airflow/plugins:/opt/airflow/plugins
     - ./shared:/opt/airflow/shared:ro
     - ./feature_store:/opt/airflow/feature_store
-    # Job Spark chạy tại chỗ nên chỉ cần mount, không phải rsync lên GCS như hồi
-    # dùng Dataproc. Sửa job xong là lần chạy sau ăn ngay, không cần deploy.
+    # Job Spark chạy tại chỗ nên chỉ cần mount, không phải upload đi đâu cả.
+    # Sửa job xong là lần chạy sau ăn ngay, không cần bước deploy.
     - ./spark/jobs:/opt/airflow/spark/jobs:ro
     # Driver ghi event log vào đây; spark-history đọc lại. Không có nó thì UI 4040
     # chết theo job và không còn gì để xem sau khi DAG chạy xong lúc 00:15.
@@ -83,7 +83,7 @@ services:
   # VÌ SAO Flink Ở LẠI VM thay vì dùng managed: GCP không có managed Flink
   # first-party (Dataflow chạy Beam, không phải Flink -> phải viết lại
   # realtime_features.sql). Dataproc có Flink nhưng là cluster thường trú, đắt
-  # hơn cả VM này. Tải thật ~815 giao dịch/ngày = 0,0094 msg/s, đo được 0,97%
+  # hơn cả VM này. Tải thật ~813 giao dịch/ngày = 0,0094 msg/s, đo được 0,97%
   # CPU — mọi managed service đều có sàn chi phí lớn hơn 2,3 GB RAM ở đây.
   # ===================================================================
   flink-init:

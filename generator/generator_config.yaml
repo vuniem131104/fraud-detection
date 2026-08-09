@@ -1,8 +1,8 @@
 # =====================================================================
 # Config cho generator (lịch sử + streaming).
 #
-#   uv run python data_pipelines/generator/generate_offline.py   # lịch sử 1 năm
-#   uv run python data_pipelines/generator/generate_stream.py    # live -> Kafka
+#   python generator/generate_offline.py   # lịch sử 123 ngày (08/04 -> 08/08/2026)
+#   python generator/generate_stream.py    # live -> Kafka
 #
 # Mọi tham số điều khiển "chất lượng data" nằm ở đây (rubric: using generator
 # configuration). Secret (Cloud SQL user-pass) lấy từ .env ở gốc repo.
@@ -55,7 +55,7 @@ dirty:
 
 # --- Streaming (live -> Managed Kafka) ------------------------------------------
 # Nguyên tắc quan trọng: NHỊP streaming phải khớp nhịp lịch sử.
-#   300.000 / 368 ngày ~ 815 giao dịch/ngày.
+#   100.000 / 123 ngày ~ 813 giao dịch/ngày.
 # Nếu cho streaming chạy 20 msg/s (=1,7 triệu/ngày) thì merch_*_10min lúc serve
 # sẽ lớn gấp hàng nghìn lần lúc train -> model vô dụng. Nên để daily_count tự
 # suy từ transactions.count.
@@ -63,7 +63,7 @@ streaming:
   daily_count: null            # null = transactions.count / số ngày lịch sử
   speedup: 1                   # 1 = thời gian thật; >1 nén lại để demo nhanh
 
-  # BURST không tiêm nhân tạo. Ở nhịp ~817/ngày (0,0095 msg/s) thì một "spike
+  # BURST không tiêm nhân tạo. Ở nhịp ~813/ngày (0,0094 msg/s) thì một "spike
   # x10 trong 5 giây" chỉ thêm 0,5 message — không đo được. Burst THẬT trong hệ
   # này đến từ archetype card_testing: 12-45 giao dịch cách nhau 4-90 giây trên
   # CÙNG một thẻ và CÙNG một merchant. Đó đúng là thứ velocity 5 phút và Flink

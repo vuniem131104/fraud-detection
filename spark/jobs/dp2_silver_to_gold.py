@@ -7,8 +7,11 @@
                (mọi bản ghi is_current=true); lần sau nếu snapshot đổi -> đóng bản cũ,
                chèn bản mới.
 
-Chạy như batch Dataproc Serverless (DAG ml_pipeline tự submit)::
+Chạy bằng spark-submit trong container Airflow (DAG ml_pipeline tự gọi, xem
+`spark_task`)::
 
+    spark-submit ... dp2_silver_to_gold.py --stage fact --date all
+    spark-submit ... dp2_silver_to_gold.py --stage dims
 """
 
 import argparse
@@ -40,8 +43,8 @@ DIMS = {
 def build_spark() -> SparkSession:
     """SparkSession đọc/ghi GCS.
 
-    Không set cấu hình filesystem nào: Dataproc Serverless đã có sẵn
-    gcs-connector và tự dùng service account của job.
+    Cấu hình filesystem (gcs-connector + auth ADC) do spark-submit truyền
+    vào bằng --conf, xem SPARK_CONF trong airflow/dags/ml_pipeline.py.
     """
     return (
         SparkSession.builder.appName("dp2_silver_to_gold")

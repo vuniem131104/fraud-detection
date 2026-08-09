@@ -36,13 +36,10 @@ Cửa sổ 5 phút thì KHÔNG có khe hở: sorted set lúc serve tính đúng 
 gồm cả giao dịch hiện tại, y hệt ``rangeBetween(-300, 0)`` ở đây. Có test canh:
 ``tests/test_velocity_parity.py``.
 
-Chạy như batch Dataproc Serverless (DAG ml_pipeline tự submit)::
+Chạy bằng spark-submit trong container Airflow (DAG ml_pipeline tự gọi, xem
+`spark_task`)::
 
-    gcloud dataproc batches submit pyspark \\
-      $DATAPROC_CODE_ROOT/dp3_training_features.py \\
-      --region=$DATAPROC_REGION \\
-      --py-files=$DATAPROC_PYFILES --jars=$DATAPROC_JDBC_JAR \\
-      -- --lookback-days 400
+    spark-submit ... dp3_training_features.py --lookback-days 400
 """
 
 from __future__ import annotations
@@ -75,8 +72,8 @@ TABLE = "feat_training"
 def build_spark() -> SparkSession:
     """SparkSession đọc/ghi GCS.
 
-    Không set cấu hình filesystem nào: Dataproc Serverless đã có sẵn
-    gcs-connector và tự dùng service account của job.
+    Cấu hình filesystem (gcs-connector + auth ADC) do spark-submit truyền
+    vào bằng --conf, xem SPARK_CONF trong airflow/dags/ml_pipeline.py.
     """
     return (
         SparkSession.builder.appName("dp3_training_features")

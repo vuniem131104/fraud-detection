@@ -19,8 +19,8 @@ confluent-kafka
 # GCS KHÔNG cần thư viện thêm: pyarrow 18 đã bundle GcsFileSystem và đọc
 # credential qua ADC/metadata server bằng C++, không qua google-auth.
 #
-# apache-airflow-providers-google đã BỎ: thứ duy nhất dùng nó là
-# DataprocCreateBatchOperator, mà DP2/DP3 giờ chạy spark-submit local.
+# apache-airflow-providers-google đã BỎ: không DAG nào còn dùng hook/operator
+# Google — DP2/DP3 chạy spark-submit local, GCS đi qua pyarrow + gcs-connector.
 google-auth
 
 # Spark chạy local trong chính container Airflow. Bám dòng 3.5 chứ KHÔNG lên 4.x:
