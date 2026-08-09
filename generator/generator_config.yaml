@@ -20,8 +20,8 @@ entities:
 # --- Cửa sổ transactions lịch sử -------------------------------------------
 transactions:
   count: 100000
-  start_date: "2026-04-06"     # lịch sử: 06/04/2026 -> 07/08/2026 (123 ngày)
-  end_date:   "2026-08-07"     # EXCLUSIVE -> partition cuối là 2026-08-06
+  start_date: "2026-04-08"     # lịch sử: 08/04/2026 -> 08/08/2026 (123 ngày)
+  end_date:   "2026-08-09"     # EXCLUSIVE -> partition cuối là 2026-08-08
   fraud_rate: 0.005            # tỉ lệ fraud THẬT (labeled rate ~0.5% sau noise)
   difficulty: full             # full = overlap + label noise thật
   patterns: [card_testing, account_takeover, bust_out, fraud_ring]
@@ -32,9 +32,18 @@ dirty:
   #    Sống được vì ops.transactions CỐ Ý không có primary key.
   duplicate_rate: 0.01
 
-  # 2) Skew: ~80% giao dịch ở US -> key lệch điển hình cho Spark
+  # 2) Skew key shuffle
+  #    (Skew địa lý ~80% US ĐÃ BỎ: country không được job Spark nào
+  #     groupBy/partitionBy nên nó không bao giờ tạo ra stage lệch — chỉ là skew
+  #     nằm im trong dữ liệu. Country giờ theo trọng số gốc của HOME_COUNTRIES.)
   skew:
-    us_share: 0.80
+    # Dồn 25% giao dịch về ĐÚNG MỘT merchant chọn ngẫu nhiên (in ra lúc sinh).
+    # Đây là skew Spark THẤY: dp3_training_features có window partitionBy
+    # merchant_id, nên toàn bộ 25% rơi vào MỘT task duy nhất. Nặng gấp bội vì
+    # merchant_distinct_cards_30d dùng size(collect_set(...)) trên rolling window
+    # -> chi phí bậc hai theo số dòng của key đó.
+    # Đặt 0 để tắt, trả generator về hành vi Pareto gốc.
+    hot_merchant_share: 0.25
 
   # 3) Schema evolution: cột mới chỉ xuất hiện từ cutover_date trở đi;
   #    partition cũ KHÔNG có cột này -> mergeSchema phải xử lý

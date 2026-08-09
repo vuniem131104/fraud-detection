@@ -253,13 +253,37 @@ docker compose up -d
 docker compose ps
 ```
 
-Airflow UI và Flink dashboard **chỉ bind `127.0.0.1`** (dashboard Flink không có
-auth). Xem qua tunnel:
+Mọi UI **chỉ bind `127.0.0.1`** (Flink dashboard và Spark UI đều không có auth).
+Xem qua tunnel:
 
 ```bash
 gcloud compute ssh fraud-detection --zone=us-central1-a \
-  -- -L 8090:localhost:8090 -L 8082:localhost:8082
+  -- -L 8090:localhost:8090 -L 8082:localhost:8082 \
+     -L 18080:localhost:18080 -L 4040:localhost:4040 -L 4041:localhost:4041
 ```
+
+| Cổng | UI |
+|---|---|
+| 8090 | Airflow |
+| 8082 | Flink dashboard |
+| 18080 | **Spark History Server** — mọi job đã chạy xong |
+| 4040 / 4041 | Spark UI của job **đang** chạy (task Spark thứ hai nhảy sang 4041) |
+
+#### Soi skew trên Spark UI
+
+DP2/DP3 xong trong vài phút nên 4040 hầu như không kịp mở — dùng 18080. Vào
+`ml_pipeline` → app tương ứng → tab **Stages** → stage có `Window [merchant_id]`
+→ bảng **Summary Metrics**:
+
+- `Duration` cột **max / median** — trên 5x là skew thật
+- `Shuffle Read Size / Records` max/median — xác nhận lệch do dữ liệu, không do máy
+- `Spill (memory/disk)` khác 0 — buffer window không vừa RAM
+
+Skew này được **tiêm cố ý** bằng `dirty.skew.hot_merchant_share` trong
+`generator/generator_config.yaml` (25% giao dịch dồn về một merchant). Xem
+`spark/jobs/dp3_training_features.py` để biết vì sao merchant là key đau nhất:
+`merchant_distinct_cards_30d` dùng `size(collect_set(...))` trên rolling window,
+chi phí bậc hai theo số dòng của key.
 
 ### 5.1 Nạp dữ liệu lịch sử (một lần, tuỳ chọn)
 

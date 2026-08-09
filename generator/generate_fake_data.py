@@ -115,6 +115,13 @@ HOUR_WEIGHTS = np.array(
 HOUR_WEIGHTS /= HOUR_WEIGHTS.sum()
 HOUR_CDF = np.cumsum(HOUR_WEIGHTS)
 
+# --- skew tiêm cố ý ------------------------------------------------------- #
+# Cả hai biến này do generate_offline.py ghi đè (giống HOME_COUNTRIES), mặc định
+# 0 = giữ nguyên hành vi generator gốc. HOT_MERCHANT_IDX được ĐIỀN NGƯỢC lại lúc
+# sinh để bên gọi biết merchant nào vừa trúng.
+HOT_MERCHANT_SHARE = 0.0    # tỉ lệ giao dịch dồn về 1 merchant duy nhất
+HOT_MERCHANT_IDX = None     # index trong `merchants`, set lúc generate_transactions
+
 # --- fraud-infrastructure sizing / label-noise rates (full realism) -------- #
 RING_DEVICES = 30           # small shared device pool -> strong graph signal
 RING_EMAILS = 50            # shared cash-out recipient emails
@@ -353,6 +360,17 @@ def generate_transactions(
     # Long-tail user activity + Pareto "whale" merchants.
     user_weights = nprng.lognormal(0.0, 1.15, n_users); user_weights /= user_weights.sum()
     merch_weights = nprng.pareto(1.16, n_merch) + 0.05; merch_weights /= merch_weights.sum()
+
+    # Hot merchant: dồn HOT_MERCHANT_SHARE giao dịch về ĐÚNG MỘT merchant, chọn
+    # ngẫu nhiên sau khi merchants đã sinh xong. Pareto tự nó đã có đuôi nặng
+    # (merchant đỉnh ~5,8% ở 100k giao dịch) nhưng đó là skew MỀM, trải đều xuống
+    # đuôi — chưa đủ để một task Spark phình lên so với phần còn lại. Ép về một key
+    # duy nhất mới tạo được hot key thật để quan sát trên Spark UI.
+    # Phần còn lại giữ NGUYÊN hình dạng Pareto tương đối, chỉ bị co lại.
+    if HOT_MERCHANT_SHARE > 0:
+        globals()["HOT_MERCHANT_IDX"] = int(nprng.integers(n_merch))
+        merch_weights *= (1.0 - HOT_MERCHANT_SHARE)
+        merch_weights[HOT_MERCHANT_IDX] += HOT_MERCHANT_SHARE
 
     # Fraud infrastructure vs benign shared ("family") devices.
     ring_dev = [int(x) for x in nprng.choice(n_dev, size=min(RING_DEVICES, n_dev), replace=False)]

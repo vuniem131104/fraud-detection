@@ -92,6 +92,11 @@ SPARK_CONF = {
     # /etc/passwd -> JVM resolve user.home thành "?" và spark-submit chết ngay
     # với `basedir must be absolute: ?/.ivy2/local`, trước khi chạm tới job.
     "spark.jars.ivy": "/tmp/.ivy2",
+    # Ghi lại toàn bộ metric của job để spark-history dựng lại UI sau khi job
+    # chết. Không bật thì UI 4040 biến mất cùng spark.stop() và không còn cách
+    # nào xem lại stage nào lệch. Log ~vài trăm KB/job.
+    "spark.eventLog.enabled": "true",
+    "spark.eventLog.dir": "file:/opt/spark-events",
 }
 
 

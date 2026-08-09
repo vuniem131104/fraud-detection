@@ -65,6 +65,9 @@ x-airflow-common: &airflow-common
     # Job Spark chạy tại chỗ nên chỉ cần mount, không phải rsync lên GCS như hồi
     # dùng Dataproc. Sửa job xong là lần chạy sau ăn ngay, không cần deploy.
     - ./spark/jobs:/opt/airflow/spark/jobs:ro
+    # Driver ghi event log vào đây; spark-history đọc lại. Không có nó thì UI 4040
+    # chết theo job và không còn gì để xem sau khi DAG chạy xong lúc 00:15.
+    - spark-events:/opt/spark-events
     - ./generator:/opt/airflow/repo/generator
     - ./.env:/opt/airflow/repo/.env:ro
     # KHÔNG mount /var/run/docker.sock: Spark chạy NGAY TRONG container này bằng
@@ -168,10 +171,10 @@ services:
       - /bin/bash
       - -c
       - |
-        mkdir -p /opt/airflow/logs /opt/airflow/plugins
-        chown -R "${AIRFLOW_UID:-1000}:0" /opt/airflow/logs /opt/airflow/plugins
-        chmod -R g+rwX /opt/airflow/logs /opt/airflow/plugins
-        echo "=> airflow logs/plugins ready (uid ${AIRFLOW_UID:-1000}, gid 0)"
+        mkdir -p /opt/airflow/logs /opt/airflow/plugins /opt/spark-events
+        chown -R "${AIRFLOW_UID:-1000}:0" /opt/airflow/logs /opt/airflow/plugins /opt/spark-events
+        chmod -R g+rwX /opt/airflow/logs /opt/airflow/plugins /opt/spark-events
+        echo "=> airflow logs/plugins + spark-events ready (uid ${AIRFLOW_UID:-1000}, gid 0)"
     restart: on-failure
 
   airflow-init:
@@ -227,6 +230,14 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
+    ports:
+      # UI của job ĐANG chạy. spark-submit chạy trong chính container này nên
+      # driver mở 4040 ở đây. Hai task Spark song song -> cái thứ hai tự nhảy sang
+      # 4041, nên map cả hai. Xem qua SSH tunnel:
+      #   gcloud compute ssh <vm> --zone=<zone> -- -L 4040:localhost:4040
+      # Job xong là 4040 tắt — muốn xem lại thì vào spark-history (18080).
+      - "127.0.0.1:4040:4040"
+      - "127.0.0.1:4041:4041"
     healthcheck:
       # Cổng 8974 chỉ mở khi bật AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK, nên hỏi
       # trực tiếp metadata DB thay vì mở thêm một HTTP endpoint.
@@ -237,6 +248,52 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ===================================================================
+  # Spark History Server — UI SỐNG SÓT sau khi job kết thúc
+  #
+  # UI 4040 của driver chết cùng spark.stop(), mà DP2/DP3 chạy lúc 00:15 và xong
+  # trong vài phút -> không ai kịp mở. History server đọc lại event log trên
+  # volume spark-events nên mọi lần chạy đều xem lại được: Stage detail ->
+  # Summary Metrics (Duration / Shuffle Read / Spill ở min-median-max) là chỗ đọc
+  # ra skew của merchant_id.
+  #
+  # Dùng image apache/spark thay vì image airflow: history server là JVM thuần,
+  # KHÔNG chạy Python nên không dính chuyện driver 3.12 vs image spark 3.8.
+  #
+  # user "185:0" là kết quả của hai ràng buộc, đổi một trong hai số là hỏng:
+  #   * uid PHẢI là 185 (user `spark` có thật trong /etc/passwd của image). Chạy
+  #     uid lạ -> Hadoop UserGroupInformation không resolve nổi user.name và chết
+  #     ngay lúc khởi động: `KerberosAuthException: invalid null input: name`.
+  #   * gid PHẢI là 0. Spark HARDCODE quyền file event log là 660, file do driver
+  #     (uid Airflow, gid 0) ghi -> chỉ group 0 mới đọc được. Để gid 185 thì
+  #     server chạy được nhưng UI rỗng, log đầy `FileNotFoundException:
+  #     ... (Permission denied)`.
+  # ===================================================================
+  spark-history:
+    image: apache/spark:3.5.3
+    container_name: spark-history
+    user: "185:0"
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.history.HistoryServer
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_HISTORY_OPTS: >-
+        -Dspark.history.fs.logDirectory=file:/opt/spark-events
+        -Dspark.history.retainedApplications=50
+      TZ: Asia/Ho_Chi_Minh
+    ports:
+      # CHỈ localhost, giống Flink dashboard: history server KHÔNG có auth.
+      #   gcloud compute ssh <vm> --zone=<zone> -- -L 18080:localhost:18080
+      - "127.0.0.1:18080:18080"
+    volumes:
+      - spark-events:/opt/spark-events
+    depends_on:
+      airflow-fs-init:
+        condition: service_completed_successfully
+    networks: [dataeng]
     restart: unless-stopped
 
   # ===================================================================
@@ -313,3 +370,7 @@ volumes:
   # Volume DUY NHẤT có state. Nhỏ (~1,5 MB) nhưng phải sống qua restart: mất nó
   # là Flink mất cả buffer window lẫn vị trí offset Kafka.
   flink-checkpoints:
+  # Event log của Spark. KHÔNG phải state (xoá đi chỉ mất lịch sử quan sát), nhưng
+  # phải là volume chứ không phải bind mount: driver ghi bằng uid Airflow, history
+  # server đọc lại — để Docker quản quyền thì đỡ phải chown thư mục trên host.
+  spark-events:

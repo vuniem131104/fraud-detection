@@ -14,7 +14,8 @@ lẫn luồng live nên batch và streaming không thể phân kỳ.
 Bốn lỗi data cố tình tiêm (chỉ trên transactions):
   1. duplicate  -- nhân bản y hệt (cùng id) ~1% dòng; sống được vì
                    ops.transactions cố ý KHÔNG có primary key
-  2. skew       -- ~80% giao dịch ở US -> key lệch điển hình cho Spark
+  2. skew       -- dồn ~25% giao dịch về MỘT merchant -> hot key thật cho shuffle
+                   của Spark (window partitionBy merchant_id ở dp3_training_features)
   3. schema evo -- cột auth_3ds_flag chỉ có từ cutover_date; job export sẽ BỎ HẲN
                    cột này ở partition trước mốc đó
   4. high card. -- device_id/card_id vốn cardinality cao (chỉ đo, không tiêm)
@@ -70,23 +71,6 @@ def window_days(cfg: dict) -> int:
 # Hai chỗ ghi đè hành vi của generator gốc                                     #
 # --------------------------------------------------------------------------- #
 
-def apply_geo_skew(us_share: float) -> None:
-    """Dồn ~``us_share`` user về US -> ~cùng tỉ lệ giao dịch ở US.
-
-    Skew tiêm ở TRỌNG SỐ QUỐC GIA, trước khi sinh, chứ không ghi đè cột sau khi
-    sinh: billing/ip_country của giao dịch được suy từ country của user, nên cách
-    này tạo skew chảy đúng qua logic fraud thay vì dán nhãn giả lên dữ liệu.
-    """
-    if not us_share or us_share <= 0:
-        return
-    others = [(c, cur, w) for (c, cur, w) in gen.HOME_COUNTRIES if c != "US"]
-    others_sum = sum(w for _, _, w in others)
-    new = [("US", "USD", us_share * 100.0)]
-    for c, cur, w in others:                        # 20% còn lại chia theo tỉ lệ cũ
-        new.append((c, cur, (1 - us_share) * 100.0 * w / others_sum))
-    gen.HOME_COUNTRIES = new
-
-
 def uniform_created_at(now: datetime, floor: datetime, rng, days: int) -> datetime:
     """Timestamp PHÂN BỐ ĐỀU trong [max(floor, now-days), now] + giờ diurnal.
 
@@ -107,8 +91,12 @@ def uniform_created_at(now: datetime, floor: datetime, rng, days: int) -> dateti
 
 
 def patch_generator(cfg: dict) -> None:
-    """Áp hai chỉnh sửa trên vào module generator gốc."""
-    apply_geo_skew(cfg["dirty"]["skew"]["us_share"])
+    """Áp các chỉnh sửa trên vào module generator gốc."""
+    # Hot merchant: tiêm ở TRỌNG SỐ chọn merchant, không ghi đè merchant_id sau
+    # khi sinh. Ghi đè sau sẽ phá quan hệ merchant<->category<->amount mà logic
+    # fraud dựa vào, và tạo ra một hot key "giả" không kéo theo hệ quả nào khác.
+    gen.HOT_MERCHANT_SHARE = float(
+        cfg["dirty"]["skew"].get("hot_merchant_share", 0.0))
     gen._draw_created_at = uniform_created_at
 
 
@@ -188,10 +176,17 @@ def quality_report(tx: pd.DataFrame, labels: pd.DataFrame, cfg: dict) -> None:
     print(f"    tổng={len(tx):,}  unique id={n_uni:,}  "
           f"duplicate={len(tx) - n_uni:,}  rate={1 - n_uni / len(tx):.2%}")
 
-    print("\n  --- (2) SKEW (billing_country_code) ---")
-    vc = tx["billing_country_code"].value_counts(normalize=True)
-    print(f"    US chiếm {vc.get('US', 0):.1%}")
-    print("    top-5: " + ", ".join(f"{c}={p:.1%}" for c, p in vc.head(5).items()))
+    # Skew tiêm vào merchant_id chứ KHÔNG phải country: không job Spark nào
+    # groupBy/partitionBy theo country nên skew địa lý không tạo ra stage lệch,
+    # còn merchant_id thì có (window merch_30 / merch_10m trong
+    # dp3_training_features). max/median dưới đây chính là con số đọc được ở cột
+    # Duration của Summary Metrics trên Spark UI.
+    print("\n  --- (2) SKEW KEY SHUFFLE (merchant_id) ---")
+    mc = tx["merchant_id"].value_counts()
+    print(f"    hot merchant : {mc.index[0]} = {mc.iloc[0]:,} giao dịch "
+          f"({mc.iloc[0] / len(tx):.1%})")
+    print(f"    #2           : {mc.iloc[1]:,}    median={mc.median():,.0f}    "
+          f"max/median={mc.iloc[0] / mc.median():.0f}x")
 
     print(f"\n  --- (3) SCHEMA EVOLUTION (cột '{new_col}', cutover {cutover}) ---")
     old, new = tx[tx["event_date"] < cutover], tx[tx["event_date"] >= cutover]
@@ -239,7 +234,7 @@ def run(cfg: dict) -> int:
     patch_generator(cfg)
 
     print(f"Sinh reference data (mốc {entity_now.date()}, cửa sổ {days} ngày, "
-          f"US≈{dcfg['skew']['us_share']:.0%}) ...")
+          f"hot merchant≈{dcfg['skew'].get('hot_merchant_share', 0):.0%}) ...")
     users, user_rows = gen.generate_users(ecfg["users"], rng, entity_now)
     device_rows = gen.generate_devices(ecfg["devices"], rng, entity_now)
     merchants, merchant_rows = gen.generate_merchants(ecfg["merchants"], rng, entity_now)
