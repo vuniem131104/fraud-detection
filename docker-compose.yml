@@ -41,6 +41,19 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "600"
     AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: "600"
     TZ: Asia/Ho_Chi_Minh
+    # Connection cho mọi hook Google (DataprocCreateBatchOperator mặc định dùng
+    # gcp_conn_id="google_cloud_default"). Airflow 3 BỎ `db init` — `db migrate`
+    # chỉ tạo schema chứ không seed connection mặc định nữa, nên thiếu dòng này
+    # là task chết ngay lúc khởi tạo hook:
+    #   AirflowNotFoundException: The conn_id `google_cloud_default` isn't defined
+    # Khai báo bằng env var thay vì `airflow connections add`: không để state
+    # trong metadata DB, và api-server — nơi Task SDK hỏi connection qua
+    # execution API — đọc được nhờ EnvironmentVariablesBackend (secrets backend
+    # đứng trước metastore). x-airflow-common gắn env này cho MỌI container nên
+    # scheduler/dag-processor/api-server đều thấy.
+    # Để TRỐNG credentials là cố ý: GoogleBaseHook rơi về ADC = service account
+    # gắn trên VM (xem comment GOOGLE_APPLICATION_CREDENTIALS trong .env).
+    AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT: '{"conn_type": "google_cloud_platform", "extra": {"project": "${GCP_PROJECT_ID:?set GCP_PROJECT_ID trong .env}"}}'
     # shared + feature_store PHẢI nằm trên PYTHONPATH. udf của ODFV bị dill pickle
     # vào registry THEO THAM CHIẾU tới module (feature_views, feature_windows), nên
     # mọi client mở registry (materialize, get_online_features) đều unpickle nó
