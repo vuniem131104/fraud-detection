@@ -100,8 +100,13 @@ def describe_key(spark: SparkSession, tx, key: str) -> dict:
 def window_probe(spark: SparkSession, tx) -> None:
     """(B) Chạy lại đúng cửa sổ merch_30 của dp3_training_features.
 
-    Không ghi ra đâu cả: ``count()`` ở cuối chỉ để ép Spark thực thi toàn bộ
-    window, đủ để stage hiện lên trên UI kèm metric.
+    BẪY: KHÔNG dùng ``out.count()`` để ép thực thi. ``count()`` không cần giá trị
+    của hai cột window, nên optimizer cắt luôn node Window ra khỏi plan —
+    job vẫn chạy, vẫn mất mười mấy giây quét parquet, nhưng shuffle read = 0 và
+    tab SQL không có node ``Window`` nào. Đo được đúng cái không có gì.
+
+    Sink ``noop`` thì phải sinh ra MỌI cột của mọi dòng nên không cắt được gì,
+    mà vẫn không ghi byte nào ra đĩa — cách chuẩn để benchmark một phép biến đổi.
     """
     spark.sparkContext.setJobDescription(
         f"B. window merch_30 partitionBy(merchant_id) + collect_set "
@@ -111,8 +116,10 @@ def window_probe(spark: SparkSession, tx) -> None:
     out = (tx.withColumn("merchant_tx_count_30d", F.count(F.lit(1)).over(win))
              .withColumn("merchant_distinct_cards_30d",
                          F.size(F.collect_set("card_id").over(win))))
-    n = out.count()
-    print(f"\n[B] window merch_30 chạy xong trên {n:,} dòng — mở stage này trên UI")
+    out.write.format("noop").mode("overwrite").save()
+    print("\n[B] window merch_30 đã chạy THẬT (sink noop) — mở stage này trên UI.\n"
+          "    Kiểm nhanh là đúng stage: tab SQL của query này phải có node "
+          "`Window`,\n    và stage tương ứng phải có Shuffle Read > 0.")
 
 
 def main() -> None:
