@@ -55,6 +55,15 @@ x-airflow-common: &airflow-common
     # trong feature_views.py.
     PYTHONPATH: /opt/airflow/code:/opt/airflow/shared:/opt/airflow/feature_store
     SHARED_DIR: /opt/airflow/shared
+    # --- Offline store của Feast ------------------------------------------
+    # feature_store.yaml đọc POSTGRES_HOST/POSTGRES_DB, còn .env đặt tên là
+    # PG_HOST/WAREHOUSE_POSTGRES_DB -> map ở đây, không nhân đôi giá trị trong
+    # .env. Feast substitute bằng os.path.expandvars: biến thiếu KHÔNG báo lỗi mà
+    # giữ nguyên chuỗi "${POSTGRES_HOST}", nên `feast apply` vẫn xanh (schema khai
+    # tường minh, không cần connect) rồi `feast materialize` mới chết ở bước
+    # connect. Dùng `:?` để thiếu PG_HOST là lỗi ngay lúc compose parse.
+    POSTGRES_HOST: ${PG_HOST:?set PG_HOST trong .env}
+    POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/include:/opt/airflow/code/include
@@ -357,6 +366,11 @@ services:
       FEAST_REPO_PATH: /opt/airflow/feature_store
       SHARED_DIR: /opt/airflow/shared
       TZ: Asia/Ho_Chi_Minh
+      # Bridge chỉ push (online store) nên không đọc offline store, nhưng
+      # feature_store/check_online.py chạy trong container này thì cần — xem
+      # ghi chú ở airflow-common.
+      POSTGRES_HOST: ${PG_HOST:?set PG_HOST trong .env}
+      POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
     entrypoint: ["python", "-m", "include.feature_bridge", "--max-seconds", "0"]
     volumes:
       - ./airflow/include:/opt/airflow/code/include
