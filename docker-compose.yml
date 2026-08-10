@@ -123,6 +123,13 @@ services:
       #   gcloud compute ssh <vm> --zone=<zone> -- -L 8082:localhost:8082
       - "127.0.0.1:8082:8081"
     environment:
+      # flink/sql/submit.sh render template ngay TRONG container này (sql-client
+      # chạy ở jobmanager) nên hai biến này phải có mặt ở đây. Taskmanager KHÔNG
+      # cần: bootstrap + jaas config đã nằm trong SQL đã render, đi cùng job graph.
+      # Chỉ khai 2 biến thay vì env_file: [.env] — cluster Flink không có việc gì
+      # với credential Postgres/Redis.
+      - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP:?set KAFKA_BOOTSTRAP trong .env}
+      - KAFKA_SASL_MECHANISM=${KAFKA_SASL_MECHANISM:-OAUTHBEARER}
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: flink-jobmanager
