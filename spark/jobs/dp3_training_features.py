@@ -56,6 +56,7 @@ from pyspark.sql import functions as F
 sys.path.insert(0, os.environ.get("SHARED_DIR", "/opt/spark/shared"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared"))
 import feature_windows as W  # noqa: E402
+import spark_windows as SW  # noqa: E402
 
 # Đường dẫn data lake trên GCS. LAKE_ROOT quyết định layout (1 bucket 4 prefix
 # hoặc 4 bucket riêng) — xem airflow/include/lake.py.
@@ -156,6 +157,20 @@ def main() -> None:
     n_tx = tx.count()
     print(f"[DP3b] {n_tx:,} giao dịch (tới {max_date})")
 
+    # merchant_distinct_cards_30d tính TRƯỚC chuỗi withColumn, bằng thuật toán
+    # sự kiện thay vì size(collect_set) — xem shared/spark_windows.py.
+    #
+    # Vì sao chỉ riêng feature này: merchant_id lệch 1,542x (một merchant ôm
+    # 24,5% số dòng), mà collect_set trên rangeBetween có chi phí BẬC HAI theo số
+    # dòng của một khoá. Đo được: stage Window(merchant_id) mất 78s, trong đó một
+    # task ôm 71,7s còn task kia 6,4s — hơn nửa wall clock của cả job.
+    #
+    # Đặt ở đây, không nhét vào chuỗi withColumn, vì nó là join chứ không phải
+    # Column: nhánh dựng timeline chỉ đọc lại (merchant_id, card_id, ts) từ
+    # parquet, không kéo theo toàn bộ window function phía sau.
+    tx = SW.distinct_count_range(tx, ["merchant_id"], "card_id",
+                                 W.MERCHANT_WINDOW_S, "merchant_distinct_cards_30d")
+
     # --- cửa sổ -------------------------------------------------------------- #
     card_90 = _rolling(["card_id"], W.CARD_LONG_WINDOW_S)
     card_7 = _rolling(["card_id"], W.CARD_SHORT_WINDOW_S)
@@ -208,7 +223,9 @@ def main() -> None:
         .withColumn("merchant_amount_avg_30d", F.avg("amount_usd").over(merch_30))
         .withColumn("merchant_amount_std_30d",
                     F.coalesce(F.stddev("amount_usd").over(merch_30), F.lit(0.0)))
-        .withColumn("merchant_distinct_cards_30d", n_distinct("card_id", merch_30))
+        # merchant_distinct_cards_30d KHÔNG ở đây: nó là phép biến đổi cả
+        # DataFrame chứ không phải một Column. Xem chỗ gọi distinct_count_range
+        # bên trên và shared/spark_windows.py để biết vì sao không dùng collect_set.
         # ---- merchant: real-time 10 phút (serve = Flink) ----
         .withColumn("merch_tx_count_10min", F.count(F.lit(1)).over(merch_10m).cast("long"))
         .withColumn("merch_distinct_cards_10min", n_distinct("card_id", merch_10m))

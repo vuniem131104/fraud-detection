@@ -10,9 +10,10 @@ History Server mà mỗi phép đo là một job có TÊN RÕ RÀNG, thay vì đ
       không nói gì về Spark, nhưng cho biết key nào ĐÁNG nghi: max/median.
 
   (B) SKEW TRONG SHUFFLE — chạy lại đúng cửa sổ ``merch_30`` của
-      dp3_training_features (``partitionBy(merchant_id) rangeBetween(-30d, 0)``
-      + ``size(collect_set(card_id))``). Đây mới là thứ Spark thật sự phải gánh,
-      và là stage cần mở trên UI.
+      dp3_training_features (``partitionBy(merchant_id) rangeBetween(-30d, 0)``),
+      ĐO CẢ HAI cách tính distinct rồi kiểm chứng chúng ra cùng kết quả:
+      ``size(collect_set)`` (bản cũ) và ``spark_windows.distinct_count_range``
+      (bản tối ưu). Đây mới là thứ Spark thật sự phải gánh.
 
 Vì sao (B) đắt hơn (A) rất nhiều dù cùng một key: ``collect_set`` trên
 ``rangeBetween`` KHÔNG có buffer trượt — mỗi dòng dựng lại set từ đầu cửa sổ, nên
@@ -24,12 +25,22 @@ Chạy bằng spark-submit trong container Airflow::
     spark-submit ... skew_probe.py --source silver
     spark-submit ... skew_probe.py --source gold --skip-window
 
+LƯU Ý về dữ liệu: ``curated/fact_transactions`` chỉ có những ngày DAG đã chạy
+(DP2 ghi theo ``--date``, ``partitionOverwriteMode=dynamic``). Muốn ``--source
+gold`` có đủ lịch sử như silver thì phải backfill trước::
+
+    spark-submit ... dp2_silver_to_gold.py --stage fact --date all
+
 Đọc kết quả trên UI (History Server, cổng 18080):
 
-  Stages -> mở stage của job "B. window merch_30" -> Summary Metrics:
-    * Duration        max/median > 5x   -> một task ôm phần việc lớn bất thường
-    * Shuffle Read    max/median lệch   -> lệch do DỮ LIỆU, không phải máy chậm
-    * Spill (memory)  khác 0            -> buffer cửa sổ không vừa RAM
+  Stages -> mở stage của job "B1."/"B2." -> Summary Metrics:
+    * Duration / CPU  max/min > 5x    -> một task ôm phần việc lớn bất thường
+    * Spill (memory)  khác 0          -> buffer cửa sổ không vừa RAM
+
+  ĐỪNG đọc skew của cửa sổ này qua Shuffle Read: chi phí của ``collect_set`` trên
+  ``rangeBetween`` tỉ lệ với BÌNH PHƯƠNG số dòng mỗi key, không tỉ lệ với byte.
+  Đo thật trên 100,752 dòng: Shuffle Read lệch 1,01x (nhìn như không skew) trong
+  khi Duration lệch 21x. Byte-per-task luôn trông cân bằng ở đây.
 """
 
 from __future__ import annotations
@@ -37,6 +48,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 from pyspark.sql import SparkSession, Window
@@ -46,6 +58,7 @@ from pyspark.sql import functions as F
 sys.path.insert(0, os.environ.get("SHARED_DIR", "/opt/spark/shared"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared"))
 import feature_windows as W  # noqa: E402
+import spark_windows as SW  # noqa: E402
 
 LAKE_ROOT = os.environ["LAKE_ROOT"]
 if not LAKE_ROOT.endswith("/"):
@@ -97,29 +110,84 @@ def describe_key(spark: SparkSession, tx, key: str) -> dict:
             "share": agg["max"] / agg["rows"]}
 
 
-def window_probe(spark: SparkSession, tx) -> None:
-    """(B) Chạy lại đúng cửa sổ merch_30 của dp3_training_features.
+DISTINCT_COL = "merchant_distinct_cards_30d"
 
-    BẪY: KHÔNG dùng ``out.count()`` để ép thực thi. ``count()`` không cần giá trị
-    của hai cột window, nên optimizer cắt luôn node Window ra khỏi plan —
-    job vẫn chạy, vẫn mất mười mấy giây quét parquet, nhưng shuffle read = 0 và
-    tab SQL không có node ``Window`` nào. Đo được đúng cái không có gì.
 
-    Sink ``noop`` thì phải sinh ra MỌI cột của mọi dòng nên không cắt được gì,
-    mà vẫn không ghi byte nào ra đĩa — cách chuẩn để benchmark một phép biến đổi.
+def _merch_30() -> Window:
+    """Đúng cửa sổ ``merch_30`` của dp3_training_features."""
+    return (Window.partitionBy("merchant_id").orderBy("ts")
+            .rangeBetween(-W.MERCHANT_WINDOW_S, 0))
+
+
+def _drain(spark: SparkSession, desc: str, df) -> float:
+    """Ép thực thi df qua sink ``noop`` và trả về số giây.
+
+    BẪY: KHÔNG dùng ``df.count()`` để ép thực thi. ``count()`` không cần giá trị
+    của các cột window, nên optimizer cắt luôn node Window ra khỏi plan — job vẫn
+    chạy, vẫn mất mười mấy giây quét parquet, nhưng shuffle read = 0 và tab SQL
+    không có node ``Window`` nào. Đo được đúng cái không có gì.
+
+    Sink ``noop`` thì phải sinh ra MỌI cột của mọi dòng nên không cắt được gì, mà
+    vẫn không ghi byte nào ra đĩa — cách chuẩn để benchmark một phép biến đổi.
     """
-    spark.sparkContext.setJobDescription(
-        f"B. window merch_30 partitionBy(merchant_id) + collect_set "
-        f"({W.MERCHANT_WINDOW_S}s)")
-    win = (Window.partitionBy("merchant_id").orderBy("ts")
-           .rangeBetween(-W.MERCHANT_WINDOW_S, 0))
-    out = (tx.withColumn("merchant_tx_count_30d", F.count(F.lit(1)).over(win))
-             .withColumn("merchant_distinct_cards_30d",
-                         F.size(F.collect_set("card_id").over(win))))
-    out.write.format("noop").mode("overwrite").save()
-    print("\n[B] window merch_30 đã chạy THẬT (sink noop) — mở stage này trên UI.\n"
-          "    Kiểm nhanh là đúng stage: tab SQL của query này phải có node "
-          "`Window`,\n    và stage tương ứng phải có Shuffle Read > 0.")
+    spark.sparkContext.setJobDescription(desc)
+    t0 = time.perf_counter()
+    df.write.format("noop").mode("overwrite").save()
+    dt = time.perf_counter() - t0
+    print(f"    {desc}: {dt:,.1f}s")
+    return dt
+
+
+def window_probe(spark: SparkSession, tx, verify: bool = True) -> None:
+    """(B) merch_30: đo bản cũ và bản tối ưu trên CÙNG dữ liệu, rồi đối chiếu.
+
+    Ba phép đo tách bạch để biết phần nào tối ưu được, phần nào không:
+
+      B0  chỉ ``count`` trên merch_30           -> sàn, không đụng tới distinct
+      B1  count + ``size(collect_set)``          -> bản cũ (dp3 trước khi sửa)
+      B2  count + ``distinct_count_range``       -> bản tối ưu
+
+    B1 - B0 mới là chi phí THẬT của cách tính distinct cũ; so thẳng B1 với B2 sẽ
+    tính cả phần count vào cả hai bên và làm tỉ lệ tăng tốc trông nhỏ đi.
+    """
+    win = _merch_30()
+    print(f"\n[B] merch_30 ({W.MERCHANT_WINDOW_S}s) — sink noop, không ghi gì")
+
+    base = tx.withColumn("merchant_tx_count_30d", F.count(F.lit(1)).over(win))
+    t0 = _drain(spark, "B0. merch_30 chỉ count (sàn, không distinct)", base)
+
+    old = base.withColumn(DISTINCT_COL, F.size(F.collect_set("card_id").over(win)))
+    t1 = _drain(spark, "B1. + distinct bằng size(collect_set) — BẢN CŨ", old)
+
+    # Dựng từ tx chứ không từ base: distinct_count_range đọc lại
+    # (merchant_id, card_id, ts) để dựng timeline, dựng từ base thì nhánh đó kéo
+    # theo cả node Window của count và phép đo hết sạch ý nghĩa.
+    new = (SW.distinct_count_range(tx, ["merchant_id"], "card_id",
+                                   W.MERCHANT_WINDOW_S, DISTINCT_COL)
+             .withColumn("merchant_tx_count_30d", F.count(F.lit(1)).over(win)))
+    t2 = _drain(spark, "B2. + distinct bằng sự kiện — BẢN TỐI ƯU", new)
+
+    d_old, d_new = t1 - t0, t2 - t0
+    print(f"\n    riêng phần distinct:  cũ {d_old:,.1f}s  ->  mới {d_new:,.1f}s", end="")
+    print(f"   ({d_old / d_new:,.1f}x)" if d_new > 0 else "")
+
+    if not verify:
+        print("    (bỏ qua kiểm chứng — hai bản CHƯA được đối chiếu)")
+        return
+
+    # Nhanh hơn mà sai thì vô nghĩa: đối chiếu từng dòng, không lấy mẫu.
+    # Bước này chạy LẠI bản cũ nên tốn thêm đúng một lần t1.
+    spark.sparkContext.setJobDescription("B3. kiểm chứng bản cũ == bản tối ưu")
+    a = tx.select("id", F.size(F.collect_set("card_id").over(win)).alias("_v_old"))
+    b = SW.distinct_count_range(tx, ["merchant_id"], "card_id",
+                                W.MERCHANT_WINDOW_S, "_v_new").select("id", "_v_new")
+    diff = a.join(b, "id").where(F.col("_v_old") != F.col("_v_new"))
+    n_bad = diff.count()
+    if n_bad:
+        print(f"\n[B3] ✗ LỆCH {n_bad:,} dòng — bản tối ưu KHÔNG tương đương, đừng dùng:")
+        diff.show(5, truncate=False)
+        raise SystemExit(1)
+    print("\n[B3] ✓ hai bản khớp trên toàn bộ số dòng (không lấy mẫu).")
 
 
 def main() -> None:
@@ -129,6 +197,9 @@ def main() -> None:
                         "gold = curated/fact_transactions")
     p.add_argument("--skip-window", action="store_true",
                    help="Chỉ đo phân bố (A), bỏ qua phần window (B).")
+    p.add_argument("--skip-verify", action="store_true",
+                   help="Bỏ bước đối chiếu cũ==mới ở (B). Nhanh hơn đúng một lần "
+                        "chạy bản cũ, đổi lại không còn bằng chứng tương đương.")
     args = p.parse_args()
 
     spark = build_spark()
@@ -156,7 +227,7 @@ def main() -> None:
           f"dp3_training_features có, với merchant_id.")
 
     if not args.skip_window:
-        window_probe(spark, tx)
+        window_probe(spark, tx, verify=not args.skip_verify)
 
     spark.stop()
 

@@ -72,7 +72,9 @@ SPARK_MASTER = os.environ.get("SPARK_MASTER", "local[2]")
 SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "3g")
 SPARK_JARS = ("/opt/spark-jars/gcs-connector-shaded.jar,"
               "/opt/spark-jars/postgresql.jar")
-SHARED_MODULE = f"{os.environ.get('SHARED_DIR', '/opt/airflow/shared')}/feature_windows.py"
+_SHARED_DIR = os.environ.get("SHARED_DIR", "/opt/airflow/shared")
+SHARED_MODULES = ",".join([f"{_SHARED_DIR}/feature_windows.py",
+                           f"{_SHARED_DIR}/spark_windows.py"])
 
 # gcs-connector không tự đăng ký: Hadoop chỉ biết scheme `gs` khi được chỉ đúng
 # hai implementation class này. auth.type=APPLICATION_DEFAULT để nó dùng service
@@ -107,8 +109,8 @@ def spark_task(task_id: str, script: str, *args: str) -> BashOperator:
     AIRFLOW_USER / AIRFLOW_PASSWORD qua os.environ. PG_DB thì phải map vì .env gọi
     nó là WAREHOUSE_POSTGRES_DB.
 
-    ``--py-files`` ship shared/feature_windows.py cho dp3_*: local mode vẫn chạy
-    driver trong JVM riêng nên PYTHONPATH của container không tự chảy vào job.
+    ``--py-files`` ship shared/*.py cho dp3_*: local mode vẫn chạy driver trong
+    JVM riêng nên PYTHONPATH của container không tự chảy vào job.
     """
     conf = " ".join(f'--conf "{k}={v}"' for k, v in SPARK_CONF.items())
     quoted = " ".join(f"'{a}'" for a in args)
@@ -118,7 +120,7 @@ def spark_task(task_id: str, script: str, *args: str) -> BashOperator:
             'export PG_DB="${WAREHOUSE_POSTGRES_DB:-warehouse}"; '
             f"exec spark-submit --master {SPARK_MASTER} "
             f"--driver-memory {SPARK_DRIVER_MEMORY} "
-            f"--jars {SPARK_JARS} --py-files {SHARED_MODULE} {conf} "
+            f"--jars {SPARK_JARS} --py-files {SHARED_MODULES} {conf} "
             f"{SPARK_JOBS_DIR}/{script} {quoted}"
         ),
     )
