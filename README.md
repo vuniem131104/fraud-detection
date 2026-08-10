@@ -75,7 +75,7 @@ airflow/include/       lake.py, lake_io.py, kafka_conf.py,
 spark/jobs/            dp2_bronze_to_silver, dp2_silver_to_gold,
                        dp3_gold_to_features, dp3_training_features
 flink/sql/             realtime_features.sql (template) + submit.sh
-flink/lib/             2 jar: kafka connector + auth handler cho Managed Kafka
+flink/lib/             3 jar: connector kafka (THIN) + kafka-clients + auth handler
 generator/             generate_offline.py, generate_stream.py, ops_store.py,
                        generate_fake_data.py, generator_config.yaml
 shared/                feature_windows.py — độ dài cửa sổ + ngưỡng độ tươi
@@ -395,7 +395,11 @@ bằng luôn `logical_date` → dùng nó sẽ sai ngày.
 | `schema ops does not exist` | chưa áp DDL (§3.5) |
 | `connection refused` tới Private IP | VM khác VPC với instance, hoặc chưa bật Private IP |
 | `SSL connection is required` | instance bật Enforce SSL — code không set `sslmode`, phải tắt hoặc sửa 3 hàm DSN |
+| `pg_hba.conf rejects connection ... no encryption` (task `materialize`) | `feature_store.yaml` khai `sslmode: disable` — đổi thành `require`. Các DSN khác ăn default `prefer` nên chỉ Feast vỡ |
+| `FeatureViewNotFoundException` lúc materialize | chưa `feast apply` (bước tay, không DAG nào chạy) — xem §5.2 |
 | DP0 không ghi được GCS | VM thiếu scope `cloud-platform` |
+| `submit.sh` báo `thiếu KAFKA_BOOTSTRAP` | container `flink-jobmanager` chưa nạp env mới: `docker compose up -d flink-jobmanager` |
+| `NoClassDefFoundError: org/apache/kafka/common/security/auth/AuthenticateCallbackHandler` | đang dùng uber jar `flink-sql-connector-kafka` (relocate kafka-clients) cùng auth handler (implement package GỐC). Phải là connector **thin** + `kafka-clients` không shade, và **bỏ** uber jar khỏi `/opt/flink/lib` |
 | Flink job RUNNING nhưng topic sink rỗng | thiếu jar `managed-kafka-auth-login-handler` ở TaskManager |
 | Spark fail `ModuleNotFoundError: feature_windows` | `./shared` chưa được mount vào container |
 | Spark fail `No suitable driver` | image cũ, chưa có `/opt/spark-jars/postgresql.jar` — build lại |

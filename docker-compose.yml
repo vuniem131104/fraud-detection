@@ -138,7 +138,15 @@ services:
         state.checkpoints.num-retained: 3
         jobmanager.memory.process.size: ${FLINK_JM_MEMORY:-1024m}
     volumes:
-      - ./flink/lib/flink-sql-connector-kafka-3.3.0-1.20.jar:/opt/flink/lib/flink-sql-connector-kafka-3.3.0-1.20.jar
+      # KHÔNG dùng flink-sql-connector-kafka (uber jar): nó RELOCATE kafka-clients
+      # sang org.apache.flink.kafka.shaded.org.apache.kafka, còn
+      # GcpLoginCallbackHandler lại implement org.apache.kafka...
+      # AuthenticateCallbackHandler bản GỐC -> job chết ngay lúc khởi tạo
+      # AdminClient: NoClassDefFoundError. Vì vậy dùng connector THIN +
+      # kafka-clients không shade: cả hai phía nói cùng một package.
+      - ./flink/lib/flink-connector-kafka-3.3.0-1.20.jar:/opt/flink/lib/flink-connector-kafka-3.3.0-1.20.jar
+      # Phiên bản PHẢI khớp kafka.version của connector 3.3.0-1.20 (= 3.4.0).
+      - ./flink/lib/kafka-clients-3.4.0.jar:/opt/flink/lib/kafka-clients-3.4.0.jar
       # Managed Kafka nói SASL/OAUTHBEARER. Maven Central không có bản -all.jar
       # cho artifact này (chỉ jar thin + 26 dependency), nên đây là bản shade tự
       # build từ com.google.cloud.hosted.kafka:...:1.0.6 — xem README.
@@ -171,7 +179,9 @@ services:
         # dư gấp trăm lần; managed memory không dùng vì state.backend là hashmap.
         taskmanager.memory.process.size: ${FLINK_TM_MEMORY:-1280m}
     volumes:
-      - ./flink/lib/flink-sql-connector-kafka-3.3.0-1.20.jar:/opt/flink/lib/flink-sql-connector-kafka-3.3.0-1.20.jar
+      # Bộ 3 jar PHẢI giống jobmanager (xem ghi chú ở đó về chuyện shading).
+      - ./flink/lib/flink-connector-kafka-3.3.0-1.20.jar:/opt/flink/lib/flink-connector-kafka-3.3.0-1.20.jar
+      - ./flink/lib/kafka-clients-3.4.0.jar:/opt/flink/lib/kafka-clients-3.4.0.jar
       # Consumer Kafka chạy Ở ĐÂY, nên thiếu jar auth thì job vẫn submit được rồi
       # chết lúc khởi tạo source — lỗi không xuất hiện lúc submit.
       - ./flink/lib/managed-kafka-auth-login-handler-1.0.6-all.jar:/opt/flink/lib/managed-kafka-auth-login-handler-1.0.6-all.jar
