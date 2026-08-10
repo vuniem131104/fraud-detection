@@ -17,7 +17,13 @@ offline_store:
   db_schema: application
   user: ${POSTGRES_USER}
   password: ${POSTGRES_PASSWORD}
-  sslmode: disable
+  # Cloud SQL bật Enforce SSL: `disable` bị pg_hba từ chối thẳng
+  # ("no encryption"). Mọi DSN khác trong repo không khai sslmode nên ăn default
+  # `prefer` của libpq và tự thương lượng TLS — đây là chỗ duy nhất khai tường
+  # minh, nên cũng là chỗ duy nhất vỡ. `require` = mã hoá, không verify cert máy
+  # chủ; đủ cho Private IP (ENCRYPTED_ONLY chỉ đòi mã hoá). Muốn verify thì phải
+  # tải CA của instance rồi thêm sslrootcert_path.
+  sslmode: require
 
 online_store:
   type: redis
