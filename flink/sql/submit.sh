@@ -42,9 +42,23 @@ else
 fi
 
 # Dấu | làm delimiter: giá trị chứa / (jaas config) nhưng không chứa |
-sed -e "s|\${KAFKA_BOOTSTRAP}|$KAFKA_BOOTSTRAP|g" \
-    -e "s|\${KAFKA_SQL_SECURITY}|$SECURITY|g" \
+#
+# Địa chỉ /^[[:space:]]*--/! : CHỈ thay ở dòng KHÔNG phải comment. Phần header của
+# template có nhắc tên hai placeholder, mà KAFKA_SQL_SECURITY nở ra 4 dòng -> ba
+# dòng sau tràn khỏi comment và thành SQL rác; sql-client chết với
+# "Non-query expression encountered in illegal context". Lọc theo dòng comment thì
+# tài liệu trong template muốn nhắc placeholder bao nhiêu lần cũng được.
+sed -e "/^[[:space:]]*--/! s|\${KAFKA_BOOTSTRAP}|$KAFKA_BOOTSTRAP|g" \
+    -e "/^[[:space:]]*--/! s|\${KAFKA_SQL_SECURITY}|$SECURITY|g" \
     "$TEMPLATE" > "$RENDERED"
+
+# Placeholder còn sót ở dòng SQL = job sẽ submit với bootstrap sai. Chặn tại đây,
+# vì lỗi kiểu đó chỉ lộ ra ở taskmanager sau khi submit thành công.
+if grep -v '^[[:space:]]*--' "$RENDERED" | grep -q '\${KAFKA_'; then
+  echo "LỖI: còn placeholder chưa thay trong $RENDERED" >&2
+  grep -n -v '^[[:space:]]*--' "$RENDERED" | grep '\${KAFKA_' >&2
+  exit 1
+fi
 
 echo "=> Kafka: $KAFKA_BOOTSTRAP (SASL_SSL/$MECHANISM)"
 echo "=> Đã render: $RENDERED"
