@@ -79,6 +79,18 @@ streaming:
   # 3) duplicate: gửi lại y hệt (trùng id) -> Flink dedup + Spark dropDuplicates
   duplicate_rate: 0.015
 
+  # --- Report chất lượng (in ra log của container stream-generator) ----------
+  # Service chạy liên tục nên report được in: sau khi lập kế hoạch mỗi ngày,
+  # cuối mỗi ngày (luỹ kế), và khi dừng (Ctrl-C hoặc SIGTERM của docker stop).
+  report:
+    progress_every_sec: 10     # nhịp in dòng tiến độ ngắn
+    # Watermark của Flink, dùng để PHÂN LOẠI mức lệch thứ tự trong report:
+    # message có event-time thấp hơn (max event-time đã gửi - ngưỡng này) sẽ bị
+    # Flink bỏ khỏi window. PHẢI khớp WATERMARK ở flink/sql/realtime_features.sql
+    # và shared/feature_windows.py::FLINK_WATERMARK_S — generator không import
+    # được shared/ (container chỉ mount ./generator) nên giá trị khai lại ở đây.
+    watermark_sec: 90
+
 # --- Reference data thay đổi theo ngày (để SCD Type 2 có việc làm) ---------
 # Mỗi khi luồng streaming sang ngày mới, generator sửa một ít thuộc tính trong
 # ops.* . Hôm sau DP0 export snapshot mới, DP2 so với bản đang current ở Gold ->

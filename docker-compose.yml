@@ -324,6 +324,10 @@ services:
       - ./.env:/opt/airflow/repo/.env:ro
     networks: [dataeng]
     restart: unless-stopped
+    # `docker stop` gửi SIGTERM; generator bắt tín hiệu để flush producer rồi in
+    # QUALITY REPORT. Grace mặc định 10s không đủ cho flush(10) + report -> tiến
+    # trình bị SIGKILL đúng lúc cần report nhất.
+    stop_grace_period: 30s
 
   ops-ingest:
     image: fraud-detection/airflow:3.2.2
