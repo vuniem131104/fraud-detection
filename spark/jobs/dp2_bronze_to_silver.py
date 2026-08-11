@@ -9,7 +9,7 @@ Chạy bằng spark-submit trong container Airflow (DAG ml_pipeline tự gọi, 
 `spark_task`)::
 
     spark-submit ... dp2_bronze_to_silver.py --date all         # backfill
-    spark-submit ... dp2_bronze_to_silver.py --date 2026-08-08  # 1 ngày
+    spark-submit ... dp2_bronze_to_silver.py --date 2026-08-10  # 1 ngày
 
 Đường dẫn data lake lấy từ env LAKE_ROOT (gs://...).
 """

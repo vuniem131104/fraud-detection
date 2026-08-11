@@ -1,7 +1,7 @@
 # =====================================================================
 # Config cho generator (lịch sử + streaming).
 #
-#   python generator/generate_offline.py   # lịch sử 123 ngày (08/04 -> 08/08/2026)
+#   python generator/generate_offline.py   # lịch sử 123 ngày (10/04 -> 10/08/2026)
 #   python generator/generate_stream.py    # live -> Kafka
 #
 # Mọi tham số điều khiển "chất lượng data" nằm ở đây (rubric: using generator
@@ -20,8 +20,8 @@ entities:
 # --- Cửa sổ transactions lịch sử -------------------------------------------
 transactions:
   count: 100000
-  start_date: "2026-04-08"     # lịch sử: 08/04/2026 -> 08/08/2026 (123 ngày)
-  end_date:   "2026-08-09"     # EXCLUSIVE -> partition cuối là 2026-08-08
+  start_date: "2026-04-10"     # lịch sử: 10/04/2026 -> 10/08/2026 (123 ngày)
+  end_date:   "2026-08-11"     # EXCLUSIVE -> partition cuối là 2026-08-10
   fraud_rate: 0.005            # tỉ lệ fraud THẬT (labeled rate ~0.5% sau noise)
   difficulty: full             # full = overlap + label noise thật
   patterns: [card_testing, account_takeover, bust_out, fraud_ring]
