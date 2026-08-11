@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import psycopg
@@ -50,7 +51,11 @@ except ImportError:        # chạy trực tiếp trong thư mục include/
 # Mốc schema evolution: partition TRƯỚC ngày này không có cột auth_3ds_flag.
 CUTOVER = os.environ.get("SCHEMA_CUTOVER_DATE", "2026-05-01")
 NEW_COL = "auth_3ds_flag"
-LOCAL_TZ = "Asia/Ho_Chi_Minh"
+# Partition ``event_date`` là NGÀY ĐỊA PHƯƠNG. Nên mốc cắt ngày trong query cũng
+# phải mang offset HCM: ``created_at`` là TIMESTAMPTZ, truyền mốc naive vào là để
+# Postgres diễn giải theo session ``TimeZone`` (Cloud SQL = UTC) -> cắt theo nửa đêm
+# UTC, tức partition ngày D thật ra chứa 07:00 D đến 07:00 D+1 giờ HCM.
+LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 TX_COLS = ["id", "user_id", "card_id", "merchant_id", "device_id", "amount_usd",
            "currency", "channel", "billing_country_code", "ip_country_code",
@@ -130,7 +135,7 @@ def write_tx_partition(fs: pafs.GcsFileSystem, bucket: str, date_str: str,
 
 def export_day(date_str: str, quiet: bool = False) -> int:
     """Export transactions của MỘT ngày. Trả số dòng đã ghi."""
-    start = datetime.fromisoformat(date_str)
+    start = datetime.fromisoformat(date_str).replace(tzinfo=LOCAL_TZ)
     end = start + timedelta(days=1)
     sql = (f"SELECT {','.join(TX_COLS)} FROM ops.transactions "
            "WHERE created_at >= %s AND created_at < %s ORDER BY created_at")
@@ -163,8 +168,8 @@ def export_range(from_date: str, to_date: str) -> int:
     ``export_day`` 367 lần sẽ mở 367 connection + 367 lần quét bảng: chậm tới mức
     task Airflow timeout (đã đo: >10 phút).
     """
-    start = datetime.fromisoformat(from_date)
-    end = datetime.fromisoformat(to_date) + timedelta(days=1)
+    start = datetime.fromisoformat(from_date).replace(tzinfo=LOCAL_TZ)
+    end = datetime.fromisoformat(to_date).replace(tzinfo=LOCAL_TZ) + timedelta(days=1)
     sql = (f"SELECT {','.join(TX_COLS)} FROM ops.transactions "
            "WHERE created_at >= %s AND created_at < %s")
     print(f"[dp0] đọc ops.transactions {from_date}..{to_date} (1 query) ...")

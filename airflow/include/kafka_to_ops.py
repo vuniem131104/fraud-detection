@@ -22,6 +22,7 @@ import json
 import os
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import psycopg
 from confluent_kafka import Consumer
@@ -34,6 +35,15 @@ except ImportError:        # chạy trực tiếp trong include/
 COLS = ["id", "user_id", "card_id", "merchant_id", "device_id", "amount_usd",
         "currency", "channel", "billing_country_code", "ip_country_code",
         "email_purchaser", "email_recipient", "created_at", "auth_3ds_flag"]
+
+# Producer gửi ``created_at`` dạng ISO-8601 **naive theo giờ HCM**: cột trong Flink
+# khai TIMESTAMP(3) nên gửi kèm offset sẽ bị parse lệch (xem
+# ``generator/generate_stream.py``). Còn ops.transactions.created_at là TIMESTAMPTZ,
+# nên COPY một datetime naive vào đó là để Postgres diễn giải theo session
+# ``TimeZone`` — Cloud SQL mặc định UTC và repo không set PGTZ ở đâu cả, nên giờ HCM
+# bị đóng dấu nhãn UTC và mọi giao dịch live lệch +7h. Phải localize lại đúng như
+# ``include/feature_bridge.py`` làm với ``window_end`` của Flink.
+LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 def ops_dsn() -> str:
@@ -62,13 +72,22 @@ def make_consumer(bootstrap: str, group: str, from_beginning: bool) -> Consumer:
 
 
 def to_row(msg: dict) -> tuple:
-    """Đổi 1 message JSON thành tuple theo thứ tự COLS."""
+    """Đổi 1 message JSON thành tuple theo thứ tự COLS.
+
+    ``created_at`` được localize về HCM trước khi ghi — xem ghi chú ở ``LOCAL_TZ``.
+    Có kiểm ``tzinfo`` thay vì ``replace`` thẳng: nếu sau này producer đổi sang gửi
+    kèm offset thì phải tôn trọng offset đó, chứ ``replace`` sẽ ghi đè trong im lặng
+    và lỗi lệch giờ quay lại y như cũ mà không ai thấy.
+    """
+    created_at = datetime.fromisoformat(msg["created_at"])
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=LOCAL_TZ)
     return (
         msg["id"], msg["user_id"], msg["card_id"], msg["merchant_id"], msg["device_id"],
         float(msg["amount_usd"]), msg.get("currency"), msg.get("channel"),
         msg.get("billing_country_code"), msg.get("ip_country_code"),
         msg.get("email_purchaser"), msg.get("email_recipient"),
-        datetime.fromisoformat(msg["created_at"]), msg.get("auth_3ds_flag"),
+        created_at, msg.get("auth_3ds_flag"),
     )
 
 
