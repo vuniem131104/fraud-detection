@@ -41,7 +41,9 @@ nhau, không thấy hình sao. Nên sau khi nạp, ``declare_keys`` khai:
   * index trên 4 cột FK của fact (Postgres KHÔNG tự tạo index cho phía con)
 
 Khoá bị mất mỗi lần nạp lại (DROP TABLE cuốn theo constraint), nên bước này chạy
-liền sau bước nạp trong cùng một lần chạy.
+liền sau bước nạp trong cùng một lần chạy. Và vì FK của lần trước sẽ CHẶN việc
+DROP dim ở lần sau, ``drop_keys`` phải chạy TRƯỚC vòng ghi — thứ tự
+``drop_keys -> ghi -> declare_keys`` là bắt buộc, không tuỳ ý.
 """
 
 from __future__ import annotations
@@ -101,6 +103,35 @@ def ensure_schema(schema: str) -> None:
     """
     with _connect(autocommit=True) as conn:
         conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+
+
+def drop_keys(schema: str) -> None:
+    """Gỡ mọi FK trong schema TRƯỚC khi nạp lại.
+
+    Bắt buộc, không phải dọn dẹp cho đẹp: Spark ghi bằng ``mode("overwrite")``,
+    tức DROP TABLE rồi CREATE. Postgres từ chối DROP một bảng đang được FK trỏ
+    tới, nên lần nạp THỨ HAI chết ngay ở dim đầu tiên::
+
+        cannot drop table dwh.dim_user because other objects depend on it
+        Detail: constraint fact_user_id_fk on table dwh.fact_transactions ...
+
+    Gỡ trước thì mọi lần nạp đều giống lần đầu. Chỉ cần gỡ FK: PK không cản DROP
+    bảng của chính nó, và bảng bị drop thì PK đi theo.
+
+    Chạy KỂ CẢ khi ``--no-keys``: FK có thể còn sót từ lần chạy trước.
+    """
+    with _connect(autocommit=True) as conn:
+        rows = conn.execute("""
+            SELECT n.nspname, t.relname, c.conname
+            FROM pg_constraint c
+            JOIN pg_class t     ON t.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE c.contype = 'f' AND n.nspname = %s
+        """, (schema,)).fetchall()
+        for ns, tbl, name in rows:
+            conn.execute(f'ALTER TABLE "{ns}"."{tbl}" DROP CONSTRAINT "{name}"')
+        if rows:
+            print(f"[DWH] gỡ {len(rows)} FK cũ trước khi nạp lại")
 
 
 def declare_keys(schema: str) -> None:
@@ -195,6 +226,7 @@ def main() -> None:
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")
     ensure_schema(args.schema)
+    drop_keys(args.schema)          # phải TRƯỚC vòng ghi, xem docstring drop_keys
     url, props = jdbc_props()
 
     for t in tables:
