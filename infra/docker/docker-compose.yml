@@ -50,6 +50,45 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ===================================================================
+  # Redis — bản LOCAL thay cho Memorystore (REDIS_7_2 trên GCP).
+  #
+  # Giữ đúng namespace `vel:card:*` mà src/fraud_detection/features/velocity.py
+  # đọc/ghi bằng script Lua. Cổng map 1-1 nên .env dùng nguyên
+  # REDIS_HOST=localhost / REDIS_PORT=6379 không phải sửa gì.
+  #
+  # appendonly: state velocity sống bằng TTL 600s (KEY_TTL_S) nên mất sạch khi
+  # restart cũng chỉ là mất tối đa 10 phút cửa sổ — nhưng AOF làm cho việc
+  # backfill bằng scripts/backfill_vel_card.py không phải chạy lại sau mỗi lần
+  # `docker compose restart`.
+  # ===================================================================
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      # Velocity zset là dữ liệu PHÁI SINH (Postgres mới là nguồn), nên khi đầy
+      # thì hy sinh key cũ còn hơn để lệnh ghi lỗi và chết đường score.
+      - --maxmemory
+      - "512mb"
+      - --maxmemory-policy
+      - allkeys-lru
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 volumes:
-  mlflow-pgdata:     
-  mlflow-artifacts:   
+  mlflow-pgdata:
+  mlflow-artifacts:
+  redis-data:

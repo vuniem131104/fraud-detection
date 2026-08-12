@@ -1,0 +1,13 @@
+"card_tx_count_5min",
+"card_amount_sum_5min",
+"card_amount_avg_5min",
+"card_acceleration",
+"merchant_spread",
+"merchant_burst",
+"device_burst",
+"device_cards_per_user"
+
+
+"card_tx_count_5min",
+"card_amount_sum_5min",
+"card_amount_avg_5min",

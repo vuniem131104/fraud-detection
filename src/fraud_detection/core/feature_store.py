@@ -99,7 +99,7 @@ class FeastFeatureStore:
         response = await self.store.get_online_features_async(
             features=self.feature_refs,
             entity_rows=entity_rows,
-        )
+        ) 
         columns = response.to_dict()
         return {name: (values[0] if values else None) for name, values in columns.items()}
 
