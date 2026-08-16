@@ -1,0 +1,411 @@
+# =====================================================================
+# Data pipeline — chạy trên VM GCP (e2-standard-4: 4 vCPU / 16 GB / 50 GB)
+#
+#   docker compose up -d
+#   docker compose ps
+#
+# Stack này CHỈ chạy trên GCP. Mọi thành phần stateful đều là dịch vụ managed,
+# nên VM chỉ còn phần compute:
+#
+#   Cloud SQL (Private IP)  <- ops.transactions, warehouse, Airflow metadata
+#   Memorystore Redis       <- online feature store của Feast
+#   Managed Kafka           <- topic transactions + 2 topic kết quả Flink
+#   Cloud Storage           <- data lake 4 tầng medallion
+#
+# Trên VM: Airflow (điều phối) + Flink (streaming 24/7) + 3 service streaming
+# + Spark chạy local trong container Airflow khi DP2/DP3 tới lượt.
+# Trần RAM ~4,6 GB nền + tối đa 2 x 3 GB Spark = ~10,6 GB / 16 GB.
+#
+# VM là STATELESS: volume duy nhất có state là checkpoint của Flink (~1,5 MB).
+# Xoá VM rồi dựng lại chỉ cần .env.
+# =====================================================================
+
+name: dataeng
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: fraud-detection/airflow:3.2.2
+  env_file: [.env]
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?set AIRFLOW_JWT_SECRET trong .env}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "600"
+    AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: "600"
+    TZ: Asia/Ho_Chi_Minh
+    # --- Spark local ------------------------------------------------------
+    # DP2/DP3 chạy spark-submit ngay trong container này (xem spark_task trong
+    # ml_pipeline.py). local[2]: VM e2-standard-4 có 4 vCPU, chừa 2 core cho
+    # Flink + scheduler khi hai task Spark chạy song song.
+    SPARK_MASTER: ${SPARK_MASTER:-local[2]}
+    SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-3g}
+    SPARK_JOBS_DIR: /opt/airflow/spark/jobs
+    # shared + feature_store PHẢI nằm trên PYTHONPATH. udf của ODFV bị dill pickle
+    # vào registry THEO THAM CHIẾU tới module (feature_views, feature_windows), nên
+    # mọi client mở registry (materialize, get_online_features) đều unpickle nó
+    # TRƯỚC khi parse repo -> ModuleNotFoundError nếu chỉ dựa vào sys.path.insert
+    # trong feature_views.py.
+    PYTHONPATH: /opt/airflow/code:/opt/airflow/shared:/opt/airflow/feature_store
+    SHARED_DIR: /opt/airflow/shared
+    # --- Offline store của Feast ------------------------------------------
+    # feature_store.yaml đọc POSTGRES_HOST/POSTGRES_DB, còn .env đặt tên là
+    # PG_HOST/WAREHOUSE_POSTGRES_DB -> map ở đây, không nhân đôi giá trị trong
+    # .env. Feast substitute bằng os.path.expandvars: biến thiếu KHÔNG báo lỗi mà
+    # giữ nguyên chuỗi "${POSTGRES_HOST}", nên `feast apply` vẫn xanh (schema khai
+    # tường minh, không cần connect) rồi `feast materialize` mới chết ở bước
+    # connect. Dùng `:?` để thiếu PG_HOST là lỗi ngay lúc compose parse.
+    POSTGRES_HOST: ${PG_HOST:?set PG_HOST trong .env}
+    POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/include:/opt/airflow/code/include
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./shared:/opt/airflow/shared:ro
+    - ./feature_store:/opt/airflow/feature_store
+    # Job Spark chạy tại chỗ nên chỉ cần mount, không phải upload đi đâu cả.
+    # Sửa job xong là lần chạy sau ăn ngay, không cần bước deploy.
+    - ./spark/jobs:/opt/airflow/spark/jobs:ro
+    # Driver ghi event log vào đây; spark-history đọc lại. Không có nó thì UI 4040
+    # chết theo job và không còn gì để xem sau khi DAG chạy xong lúc 00:15.
+    - spark-events:/opt/spark-events
+    - ./generator:/opt/airflow/repo/generator
+    - ./.env:/opt/airflow/repo/.env:ro
+    # KHÔNG mount /var/run/docker.sock: Spark chạy NGAY TRONG container này bằng
+    # spark-submit local, DAG không cần `docker exec` ra container khác. Bỏ được
+    # nghĩa là Airflow không có quyền root trên host.
+  user: "${AIRFLOW_UID:-1000}:0"
+  networks: [dataeng]
+
+services:
+  # ===================================================================
+  # Flink — session cluster, thành phần streaming 24/7 duy nhất trên VM
+  #
+  # VÌ SAO Flink Ở LẠI VM thay vì dùng managed: GCP không có managed Flink
+  # first-party (Dataflow chạy Beam, không phải Flink -> phải viết lại
+  # realtime_features.sql). Dataproc có Flink nhưng là cluster thường trú, đắt
+  # hơn cả VM này. Tải thật ~813 giao dịch/ngày = 0,0094 msg/s, đo được 0,97%
+  # CPU — mọi managed service đều có sàn chi phí lớn hơn 2,3 GB RAM ở đây.
+  # ===================================================================
+  flink-init:
+    image: flink:1.20.0
+    container_name: flink-init
+    user: root
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /opt/flink/checkpoints
+        chown -R 9999:9999 /opt/flink/checkpoints
+        echo "=> checkpoint dir ready (uid 9999)"
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+    networks: [dataeng]
+
+  flink-jobmanager:
+    image: flink:1.20.0
+    container_name: flink-jobmanager
+    command: jobmanager
+    depends_on:
+      flink-init:
+        condition: service_completed_successfully
+    ports:
+      # CHỈ bind localhost. Dashboard Flink KHÔNG có auth — mở ra 0.0.0.0 trên VM
+      # có external IP là cho cả internet quyền cancel job. Xem qua SSH tunnel:
+      #   gcloud compute ssh <vm> --zone=<zone> -- -L 8082:localhost:8082
+      - "127.0.0.1:8082:8081"
+    environment:
+      # flink/sql/submit.sh render template ngay TRONG container này (sql-client
+      # chạy ở jobmanager) nên hai biến này phải có mặt ở đây. Taskmanager KHÔNG
+      # cần: bootstrap + jaas config đã nằm trong SQL đã render, đi cùng job graph.
+      # Chỉ khai 2 biến thay vì env_file: [.env] — cluster Flink không có việc gì
+      # với credential Postgres/Redis.
+      - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP:?set KAFKA_BOOTSTRAP trong .env}
+      - KAFKA_SASL_MECHANISM=${KAFKA_SASL_MECHANISM:-OAUTHBEARER}
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        state.backend: hashmap
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        state.checkpoints.num-retained: 3
+        jobmanager.memory.process.size: ${FLINK_JM_MEMORY:-1024m}
+    volumes:
+      # KHÔNG dùng flink-sql-connector-kafka (uber jar): nó RELOCATE kafka-clients
+      # sang org.apache.flink.kafka.shaded.org.apache.kafka, còn
+      # GcpLoginCallbackHandler lại implement org.apache.kafka...
+      # AuthenticateCallbackHandler bản GỐC -> job chết ngay lúc khởi tạo
+      # AdminClient: NoClassDefFoundError. Vì vậy dùng connector THIN +
+      # kafka-clients không shade: cả hai phía nói cùng một package.
+      - ./flink/lib/flink-connector-kafka-3.3.0-1.20.jar:/opt/flink/lib/flink-connector-kafka-3.3.0-1.20.jar
+      # Phiên bản PHẢI khớp kafka.version của connector 3.3.0-1.20 (= 3.4.0).
+      - ./flink/lib/kafka-clients-3.4.0.jar:/opt/flink/lib/kafka-clients-3.4.0.jar
+      # Managed Kafka nói SASL/OAUTHBEARER. Maven Central không có bản -all.jar
+      # cho artifact này (chỉ jar thin + 26 dependency), nên đây là bản shade tự
+      # build từ com.google.cloud.hosted.kafka:...:1.0.6 — xem README.
+      # Phải ở /opt/flink/lib: Flink chỉ scan top-level, không scan thư mục con.
+      - ./flink/lib/managed-kafka-auth-login-handler-1.0.6-all.jar:/opt/flink/lib/managed-kafka-auth-login-handler-1.0.6-all.jar
+      - ./flink/sql:/opt/flink/sql
+      - flink-checkpoints:/opt/flink/checkpoints
+    networks: [dataeng]
+    restart: unless-stopped
+
+  flink-taskmanager:
+    image: flink:1.20.0
+    container_name: flink-taskmanager
+    depends_on:
+      - flink-jobmanager
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        state.backend: hashmap
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        state.checkpoints.num-retained: 3
+        # Giữ 2 slot: job realtime_features chạy parallelism=2, ít hơn thì không
+        # submit được. Slot là đơn vị SCHEDULING, không phải reservation CPU.
+        taskmanager.numberOfTaskSlots: 2
+        # Trần JVM. Default của Flink là 1728m và nó KHÔNG tự co theo RAM máy.
+        # 1280m chia ra: task heap 160 MB, managed 333 MB, network 83 MB,
+        # metaspace 256 MB, overhead 192 MB. State thật ~1,5 MB nên task heap còn
+        # dư gấp trăm lần; managed memory không dùng vì state.backend là hashmap.
+        taskmanager.memory.process.size: ${FLINK_TM_MEMORY:-1280m}
+    volumes:
+      # Bộ 3 jar PHẢI giống jobmanager (xem ghi chú ở đó về chuyện shading).
+      - ./flink/lib/flink-connector-kafka-3.3.0-1.20.jar:/opt/flink/lib/flink-connector-kafka-3.3.0-1.20.jar
+      - ./flink/lib/kafka-clients-3.4.0.jar:/opt/flink/lib/kafka-clients-3.4.0.jar
+      # Consumer Kafka chạy Ở ĐÂY, nên thiếu jar auth thì job vẫn submit được rồi
+      # chết lúc khởi tạo source — lỗi không xuất hiện lúc submit.
+      - ./flink/lib/managed-kafka-auth-login-handler-1.0.6-all.jar:/opt/flink/lib/managed-kafka-auth-login-handler-1.0.6-all.jar
+      - ./flink/sql:/opt/flink/sql
+      - flink-checkpoints:/opt/flink/checkpoints
+    networks: [dataeng]
+    restart: unless-stopped
+
+  airflow-fs-init:
+    <<: *airflow-common
+    user: "0:0"
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs /opt/airflow/plugins /opt/spark-events
+        chown -R "${AIRFLOW_UID:-1000}:0" /opt/airflow/logs /opt/airflow/plugins /opt/spark-events
+        chmod -R g+rwX /opt/airflow/logs /opt/airflow/plugins /opt/spark-events
+        echo "=> airflow logs/plugins + spark-events ready (uid ${AIRFLOW_UID:-1000}, gid 0)"
+    restart: on-failure
+
+  airflow-init:
+    <<: *airflow-common
+    depends_on:
+      airflow-fs-init:
+        condition: service_completed_successfully
+    command:
+      - bash
+      - -c
+      - |
+        airflow db migrate
+        airflow fab-db migrate
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USER:-airflow}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD:-airflow}" \
+          --firstname Admin --lastname User --role Admin \
+          --email admin@example.com || true
+    restart: on-failure
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      # CHỈ localhost — xem qua SSH tunnel:
+      #   gcloud compute ssh <vm> --zone=<zone> -- -L 8090:localhost:8090
+      - "127.0.0.1:8090:8080"
+    healthcheck:
+      # Airflow 3 chuyển health sang /api/v2/monitor/health; /health trả 404 nên
+      # container sẽ luôn "unhealthy" dù UI hoạt động bình thường.
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD", "airflow", "jobs", "check", "--job-type", "DagProcessorJob", "--local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    ports:
+      # UI của job ĐANG chạy. spark-submit chạy trong chính container này nên
+      # driver mở 4040 ở đây. Hai task Spark song song -> cái thứ hai tự nhảy sang
+      # 4041, nên map cả hai. Xem qua SSH tunnel:
+      #   gcloud compute ssh <vm> --zone=<zone> -- -L 4040:localhost:4040
+      # Job xong là 4040 tắt — muốn xem lại thì vào spark-history (18080).
+      - "127.0.0.1:4040:4040"
+      - "127.0.0.1:4041:4041"
+    healthcheck:
+      # Cổng 8974 chỉ mở khi bật AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK, nên hỏi
+      # trực tiếp metadata DB thay vì mở thêm một HTTP endpoint.
+      test: ["CMD", "airflow", "jobs", "check", "--job-type", "SchedulerJob", "--local"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ===================================================================
+  # Spark History Server — UI SỐNG SÓT sau khi job kết thúc
+  #
+  # UI 4040 của driver chết cùng spark.stop(), mà DP2/DP3 chạy lúc 00:15 và xong
+  # trong vài phút -> không ai kịp mở. History server đọc lại event log trên
+  # volume spark-events nên mọi lần chạy đều xem lại được: Stage detail ->
+  # Summary Metrics (Duration / Shuffle Read / Spill ở min-median-max) là chỗ đọc
+  # ra skew của merchant_id.
+  #
+  # Dùng image apache/spark thay vì image airflow: history server là JVM thuần,
+  # KHÔNG chạy Python nên không dính chuyện driver 3.12 vs image spark 3.8.
+  #
+  # user "185:0" là kết quả của hai ràng buộc, đổi một trong hai số là hỏng:
+  #   * uid PHẢI là 185 (user `spark` có thật trong /etc/passwd của image). Chạy
+  #     uid lạ -> Hadoop UserGroupInformation không resolve nổi user.name và chết
+  #     ngay lúc khởi động: `KerberosAuthException: invalid null input: name`.
+  #   * gid PHẢI là 0. Spark HARDCODE quyền file event log là 660, file do driver
+  #     (uid Airflow, gid 0) ghi -> chỉ group 0 mới đọc được. Để gid 185 thì
+  #     server chạy được nhưng UI rỗng, log đầy `FileNotFoundException:
+  #     ... (Permission denied)`.
+  # ===================================================================
+  spark-history:
+    image: apache/spark:3.5.3
+    container_name: spark-history
+    user: "185:0"
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.history.HistoryServer
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_HISTORY_OPTS: >-
+        -Dspark.history.fs.logDirectory=file:/opt/spark-events
+        -Dspark.history.retainedApplications=50
+      TZ: Asia/Ho_Chi_Minh
+    ports:
+      # CHỈ localhost, giống Flink dashboard: history server KHÔNG có auth.
+      #   gcloud compute ssh <vm> --zone=<zone> -- -L 18080:localhost:18080
+      - "127.0.0.1:18080:18080"
+    volumes:
+      - spark-events:/opt/spark-events
+    depends_on:
+      airflow-fs-init:
+        condition: service_completed_successfully
+    networks: [dataeng]
+    restart: unless-stopped
+
+  # ===================================================================
+  # Streaming services — chạy LIÊN TỤC, ngoài Airflow
+  #
+  #   stream-generator : sinh giao dịch live -> Managed Kafka `transactions`
+  #   ops-ingest       : Kafka -> Cloud SQL opsdb.ops.transactions
+  #   feature-bridge   : Kafka (kết quả Flink) -> Memorystore qua Feast push
+  #
+  # Cả ba dùng chung image airflow vì đã có sẵn feast + confluent-kafka +
+  # psycopg. Layer image được chia sẻ nên thêm service không tốn thêm disk.
+  # ===================================================================
+  stream-generator:
+    image: fraud-detection/airflow:3.2.2
+    container_name: stream-generator
+    env_file: [.env]
+    working_dir: /opt/airflow/repo/generator
+    environment:
+      PYTHONUNBUFFERED: "1"
+      TZ: Asia/Ho_Chi_Minh
+    entrypoint:
+      - python
+      - generate_stream.py
+      - --bootstrap
+      - ${KAFKA_BOOTSTRAP:?set KAFKA_BOOTSTRAP trong .env}
+    volumes:
+      - ./generator:/opt/airflow/repo/generator
+      - ./.env:/opt/airflow/repo/.env:ro
+    networks: [dataeng]
+    restart: unless-stopped
+    # `docker stop` gửi SIGTERM; generator bắt tín hiệu để flush producer rồi in
+    # QUALITY REPORT. Grace mặc định 10s không đủ cho flush(10) + report -> tiến
+    # trình bị SIGKILL đúng lúc cần report nhất.
+    stop_grace_period: 30s
+
+  ops-ingest:
+    image: fraud-detection/airflow:3.2.2
+    container_name: ops-ingest
+    env_file: [.env]
+    working_dir: /opt/airflow/code
+    environment:
+      PYTHONPATH: /opt/airflow/code
+      PYTHONUNBUFFERED: "1"
+      TZ: Asia/Ho_Chi_Minh
+    entrypoint: ["python", "-m", "include.kafka_to_ops", "--max-seconds", "0"]
+    volumes:
+      - ./airflow/include:/opt/airflow/code/include
+    networks: [dataeng]
+    restart: unless-stopped
+
+  feature-bridge:
+    image: fraud-detection/airflow:3.2.2
+    container_name: feature-bridge
+    env_file: [.env]
+    working_dir: /opt/airflow/code
+    environment:
+      # Bridge mở registry Feast -> phải unpickle udf của ODFV, vốn tham chiếu
+      # tới module feature_views/feature_windows. Xem ghi chú ở airflow-common.
+      PYTHONPATH: /opt/airflow/code:/opt/airflow/shared:/opt/airflow/feature_store
+      PYTHONUNBUFFERED: "1"
+      FEAST_REPO_PATH: /opt/airflow/feature_store
+      SHARED_DIR: /opt/airflow/shared
+      TZ: Asia/Ho_Chi_Minh
+      # Bridge chỉ push (online store) nên không đọc offline store, nhưng
+      # feature_store/check_online.py chạy trong container này thì cần — xem
+      # ghi chú ở airflow-common.
+      POSTGRES_HOST: ${PG_HOST:?set PG_HOST trong .env}
+      POSTGRES_DB: ${WAREHOUSE_POSTGRES_DB:-warehouse}
+    entrypoint: ["python", "-m", "include.feature_bridge", "--max-seconds", "0"]
+    volumes:
+      - ./airflow/include:/opt/airflow/code/include
+      - ./shared:/opt/airflow/shared:ro
+      - ./feature_store:/opt/airflow/feature_store
+    networks: [dataeng]
+    restart: unless-stopped
+
+networks:
+  dataeng:
+    name: dataeng
+    driver: bridge
+
+volumes:
+  # Volume DUY NHẤT có state. Nhỏ (~1,5 MB) nhưng phải sống qua restart: mất nó
+  # là Flink mất cả buffer window lẫn vị trí offset Kafka.
+  flink-checkpoints:
+  # Event log của Spark. KHÔNG phải state (xoá đi chỉ mất lịch sử quan sát), nhưng
+  # phải là volume chứ không phải bind mount: driver ghi bằng uid Airflow, history
+  # server đọc lại — để Docker quản quyền thì đỡ phải chown thư mục trên host.
+  spark-events:

@@ -1,0 +1,114 @@
+# =====================================================================
+# Config cho generator (lịch sử + streaming).
+#
+#   python generator/generate_offline.py   # lịch sử 123 ngày (10/04 -> 10/08/2026)
+#   python generator/generate_stream.py    # live -> Kafka
+#
+# Mọi tham số điều khiển "chất lượng data" nằm ở đây (rubric: using generator
+# configuration). Secret (Cloud SQL user-pass) lấy từ .env ở gốc repo.
+# =====================================================================
+
+seed: 42
+
+# --- Quy mô entity (reference data -> ops.{users,cards,merchants,devices}) ---
+entities:
+  users: 25000
+  merchants: 1500
+  devices: 30000
+  # số card/user do generator quyết định (1-3), không chỉnh ở đây
+
+# --- Cửa sổ transactions lịch sử -------------------------------------------
+transactions:
+  count: 100000
+  start_date: "2026-04-10"     # lịch sử: 10/04/2026 -> 10/08/2026 (123 ngày)
+  end_date:   "2026-08-11"     # EXCLUSIVE -> partition cuối là 2026-08-10
+  fraud_rate: 0.005            # tỉ lệ fraud THẬT (labeled rate ~0.5% sau noise)
+  difficulty: full             # full = overlap + label noise thật
+  patterns: [card_testing, account_takeover, bust_out, fraud_ring]
+
+# --- Bốn lỗi data cố tình tiêm (áp lên transactions) -----------------------
+dirty:
+  # 1) Duplicate: nhân bản y hệt (cùng id) một phần dòng.
+  #    Sống được vì ops.transactions CỐ Ý không có primary key.
+  duplicate_rate: 0.01
+
+  # 2) Skew key shuffle
+  #    (Skew địa lý ~80% US ĐÃ BỎ: country không được job Spark nào
+  #     groupBy/partitionBy nên nó không bao giờ tạo ra stage lệch — chỉ là skew
+  #     nằm im trong dữ liệu. Country giờ theo trọng số gốc của HOME_COUNTRIES.)
+  skew:
+    # Dồn 25% giao dịch về ĐÚNG MỘT merchant chọn ngẫu nhiên (in ra lúc sinh).
+    # Đây là skew Spark THẤY: dp3_training_features có window partitionBy
+    # merchant_id, nên toàn bộ 25% rơi vào MỘT task duy nhất. Nặng gấp bội vì
+    # merchant_distinct_cards_30d dùng size(collect_set(...)) trên rolling window
+    # -> chi phí bậc hai theo số dòng của key đó.
+    # Đặt 0 để tắt, trả generator về hành vi Pareto gốc.
+    hot_merchant_share: 0.25
+
+  # 3) Schema evolution: cột mới chỉ xuất hiện từ cutover_date trở đi;
+  #    partition cũ KHÔNG có cột này -> mergeSchema phải xử lý
+  schema_evolution:
+    new_column: auth_3ds_flag
+    cutover_date: "2026-07-01"
+
+  # 4) High cardinality: device_id/card_id vốn đã cardinality cao -> chỉ đo.
+
+# --- Streaming (live -> Managed Kafka) ------------------------------------------
+# Nguyên tắc quan trọng: NHỊP streaming phải khớp nhịp lịch sử.
+#   100.000 / 123 ngày ~ 813 giao dịch/ngày.
+# Nếu cho streaming chạy 20 msg/s (=1,7 triệu/ngày) thì merch_*_10min lúc serve
+# sẽ lớn gấp hàng nghìn lần lúc train -> model vô dụng. Nên để daily_count tự
+# suy từ transactions.count.
+streaming:
+  daily_count: null            # null = transactions.count / số ngày lịch sử
+  speedup: 1                   # 1 = thời gian thật; >1 nén lại để demo nhanh
+
+  # BURST không tiêm nhân tạo. Ở nhịp ~813/ngày (0,0094 msg/s) thì một "spike
+  # x10 trong 5 giây" chỉ thêm 0,5 message — không đo được. Burst THẬT trong hệ
+  # này đến từ archetype card_testing: 12-45 giao dịch cách nhau 4-90 giây trên
+  # CÙNG một thẻ và CÙNG một merchant. Đó đúng là thứ velocity 5 phút và Flink
+  # phải bắt được, nên nó là burst có ý nghĩa duy nhất.
+
+  # 2) late arrival: message tới MUỘN hơn event-time của nó.
+  #    Event-time giữ nguyên (thời điểm giao dịch thật), chỉ thời điểm GỬI bị
+  #    đẩy về sau -> đúng nghĩa "hàng về muộn" mà watermark Flink phải chịu.
+  late_rate: 0.05
+  late_delay_min_sec: 5
+  late_delay_max_sec: 60       # < watermark Flink (90s) -> vẫn kịp vào window
+
+  # 3) duplicate: gửi lại y hệt (trùng id) -> Flink dedup + Spark dropDuplicates
+  duplicate_rate: 0.015
+
+  # --- Report chất lượng (in ra log của container stream-generator) ----------
+  # Service chạy liên tục nên report được in: sau khi lập kế hoạch mỗi ngày,
+  # cuối mỗi ngày (luỹ kế), và khi dừng (Ctrl-C hoặc SIGTERM của docker stop).
+  report:
+    progress_every_sec: 10     # nhịp in dòng tiến độ ngắn
+    # Watermark của Flink, dùng để PHÂN LOẠI mức lệch thứ tự trong report:
+    # message có event-time thấp hơn (max event-time đã gửi - ngưỡng này) sẽ bị
+    # Flink bỏ khỏi window. PHẢI khớp WATERMARK ở flink/sql/realtime_features.sql
+    # và shared/feature_windows.py::FLINK_WATERMARK_S — generator không import
+    # được shared/ (container chỉ mount ./generator) nên giá trị khai lại ở đây.
+    watermark_sec: 90
+
+# --- Reference data thay đổi theo ngày (để SCD Type 2 có việc làm) ---------
+# Mỗi khi luồng streaming sang ngày mới, generator sửa một ít thuộc tính trong
+# ops.* . Hôm sau DP0 export snapshot mới, DP2 so với bản đang current ở Gold ->
+# đóng version cũ, mở version mới. Không có phần này thì mỗi thực thể chỉ có
+# đúng 1 version và SCD2 tồn tại mà không chứng minh được gì.
+dim_churn:
+  users_per_day: 40            # đổi country_code / kyc_level / email_verified
+  cards_per_day: 15            # thẻ chuyển sang virtual
+  merchants_per_day: 10        # team risk đánh giá lại risk_level
+
+# --- Postgres (Cloud SQL) ---------------------------------------------------
+# host lấy từ env PG_HOST (Private IP của Cloud SQL) — xem ops_store.pg_dsn.
+postgres:
+  port: 5432
+  ops_db: "opsdb"            # ops.transactions + ops.{users,cards,merchants,devices}
+  warehouse_db: "warehouse"  # application.labels
+
+# --- Kafka (Managed Service for Apache Kafka) -------------------------------
+# bootstrap lấy từ env KAFKA_BOOTSTRAP; service truyền qua --bootstrap.
+kafka:
+  topic: "transactions"

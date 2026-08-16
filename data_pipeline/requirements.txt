@@ -1,0 +1,29 @@
+feast[redis,postgres]
+# psycopg v3 (KHÔNG phải psycopg2) — image không có psycopg2, nên connection string
+# của Airflow phải là `postgresql+psycopg://`, không phải `postgresql+psycopg2://`.
+#
+# psycopg v3 có async native, dùng được cho CẢ HAI connection của Airflow 3:
+#   AIRFLOW__DATABASE__SQL_ALCHEMY_CONN       = postgresql+psycopg://...
+#   AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_ASYNC = postgresql+psycopg://...
+# Nên KHÔNG cần asyncpg. Airflow chỉ tự map postgresql -> asyncpg
+# (settings.py: AIO_LIBS_MAPPING) khi SQL_ALCHEMY_CONN_ASYNC không được khai; ta
+# khai tường minh nên nó dùng đúng psycopg.
+psycopg[binary,pool]
+uvicorn>=0.37.0
+apache-airflow-providers-fab
+confluent-kafka
+
+# google-auth : access token cho SASL/OAUTHBEARER của Managed Kafka
+#               (airflow/include/kafka_conf.py + generator/ops_store.py).
+#
+# GCS KHÔNG cần thư viện thêm: pyarrow 18 đã bundle GcsFileSystem và đọc
+# credential qua ADC/metadata server bằng C++, không qua google-auth.
+#
+# apache-airflow-providers-google đã BỎ: không DAG nào còn dùng hook/operator
+# Google — DP2/DP3 chạy spark-submit local, GCS đi qua pyarrow + gcs-connector.
+google-auth
+
+# Spark chạy local trong chính container Airflow. Bám dòng 3.5 chứ KHÔNG lên 4.x:
+# Spark 4 bật ANSI mode mặc định, đủ để mấy phép cast trong dp2_*/dp3_* đang im
+# lặng trả NULL chuyển thành ném lỗi giữa chừng.
+pyspark==3.5.9
